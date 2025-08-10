@@ -43,11 +43,11 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
     raise ValueError("SUPABASE_URL y/o SUPABASE_SERVICE_KEY no están configurados")
 
 # Storage
-BUCKET = "pdfs"
+BUCKET = os.getenv("BUCKET", "pdfs")
 OUTPUT_DIR = "static/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Cliente Supabase con service_role (RLS bypass)
+# Cliente Supabase con service_role (bypass RLS)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ---------- BOT ----------
@@ -87,7 +87,6 @@ def generar_folio_automatico(prefijo="05") -> str:
         )
         if res.data:
             ultimo = str(res.data[0]["folio"])
-            # extrae parte numérica al final, quitando prefijo
             m = re.match(rf"^{re.escape(prefijo)}(\d+)$", ultimo)
             num = int(m.group(1)) + 1 if m else 1
         else:
@@ -97,7 +96,7 @@ def generar_folio_automatico(prefijo="05") -> str:
     return f"{prefijo}{num:04d}"
 
 def subir_pdf_supabase(path_local: str, nombre_pdf: str) -> str:
-    """Sube PDF al bucket con upsert=true y devuelve URL pública."""
+    """Sube PDF al bucket con upsert=True y devuelve URL pública."""
     nombre_pdf = _slug_filename(nombre_pdf)  # sin slash inicial
     with open(path_local, "rb") as f:
         data = f.read()
@@ -138,7 +137,6 @@ def _make_pdf(datos: dict) -> str:
     # Fechas
     fecha_exp = datetime.now()
     fecha_ven = fecha_exp + timedelta(days=30)
-    # Mes en español (sin depender de locale del contenedor)
     meses = {
         1:"ENERO",2:"FEBRERO",3:"MARZO",4:"ABRIL",5:"MAYO",6:"JUNIO",
         7:"JULIO",8:"AGOSTO",9:"SEPTIEMBRE",10:"OCTUBRE",11:"NOVIEMBRE",12:"DICIEMBRE"
