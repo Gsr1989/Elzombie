@@ -207,3 +207,7 @@ def info():
         "bot_token_configured": bool(BOT_TOKEN),
         "base_url_configured": bool(BASE_URL),
 }
+
+@dp.message_handler()
+async def fallback(msg: types.Message, state: FSMContext):
+    await msg.answer(f"Te leí: {msg.text}")
