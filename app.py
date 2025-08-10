@@ -15,7 +15,7 @@ import tempfile
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 
 # Aiogram v2
 from aiogram import Bot, Dispatcher, types
@@ -39,7 +39,7 @@ storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=storage)
 
-# ---------- FSM: Formulario de Permiso (ORDEN de preguntas) ----------
+# ---------- FSM: Formulario de Permiso ----------
 class PermisoForm(StatesGroup):
     marca = State()
     linea = State()
@@ -92,14 +92,14 @@ def _make_pdf(datos: dict) -> str:
     c.save()
     return path
 
-# ---------- VALIDACIONES SENCILLAS ----------
+# ---------- VALIDACIONES ----------
 def _valida_anio(txt: str) -> str:
     t = txt.strip()
     if re.fullmatch(r"\d{4}", t) and 1900 <= int(t) <= 2100:
         return t
     raise ValueError("anio")
 
-# ---------- HANDLERS (conversación) ----------
+# ---------- HANDLERS ----------
 @dp.message_handler(Command("start"))
 async def cmd_start(m: types.Message):
     await m.answer(
@@ -181,12 +181,11 @@ async def cmd_cancel(m: types.Message, state: FSMContext):
     await state.finish()
     await m.answer("🛑 Proceso cancelado. Usa /permiso para empezar de nuevo.")
 
-# Fallback: cualquier texto fuera del flujo
 @dp.message_handler()
 async def fallback(msg: types.Message, state: FSMContext):
     await msg.answer("No entendí. Usa /permiso para capturar el formulario o /start para ver ayuda.")
 
-# ---------- LIFESPAN: set/unset webhook ----------
+# ---------- LIFESPAN (set/unset webhook) ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Iniciando bot...")
@@ -243,18 +242,22 @@ async def telegram_webhook(request: Request):
     try:
         data = await request.json()
         logger.info(f"UPDATE ENTRANTE: {data}")
-    except Exception as e:
+    except Exception:
         logger.exception("❌ request.json() falló")
-        # Aun así devolvemos 200 para que Telegram no reintente
         return {"ok": True, "note": "bad_json"}
 
+    # Parse del Update
     try:
-        update = types.Update(**data)  # pydantic v1 compatible
+        update = types.Update(**data)
     except Exception as e:
         logger.exception(f"❌ No pude parsear Update: {e}")
         return {"ok": True, "note": "parse_failed"}
 
     try:
+        # 🔧 FIX: setear bot/dispatcher actuales en el contexto
+        Bot.set_current(bot)
+        Dispatcher.set_current(dp)
+
         await dp.process_update(update)
     except Exception as e:
         logger.exception(f"❌ Error procesando update: {e}")
