@@ -1,7 +1,18 @@
+# app.py
+# -------------------------------------------------------------
+# Bot de Telegram (Aiogram v2) + FastAPI con webhook en Render
+# Rutas:
+#   GET  /          -> healthcheck (muestra estado y URL del webhook)
+#   GET  /info      -> flags de configuración de envs
+#   POST /webhook   -> endpoint que Telegram llama con updates
+#   GET  /webhook   -> ping manual (útil para probar 200 OK)
+# -------------------------------------------------------------
+
 import os
+import re
 import logging
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request, HTTPException
 from contextlib import asynccontextmanager
@@ -29,10 +40,86 @@ storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=storage)
 
-# **FIX CONTEXTO**: Aiogram necesita saber cuál es el bot/dispatcher "actual".
-# Esto evita el error "No se puede obtener la instancia del bot del contexto".
-Bot.set_current(bot)
-Dispatcher.set_current(dp)
+# ---------- Helpers: parse de fecha/hora tolerante ----------
+def parse_fecha(texto: str) -> str:
+    """
+    Acepta:
+      - YYYY-MM-DD (recomendado)
+      - DD/MM/YYYY
+      - DD-MM-YYYY
+      - DD.MM.YYYY
+      - 'hoy' | 'mañana' (sin acento tb)
+    Devuelve string normalizado YYYY-MM-DD o lanza ValueError.
+    """
+    t = texto.strip().lower()
+
+    # Palabras
+    if t in ("hoy",):
+        return datetime.now().strftime("%Y-%m-%d")
+    if t in ("manana", "mañana"):
+        return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # YYYY-MM-DD
+    try:
+        dt = datetime.strptime(t, "%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    # DD/MM/YYYY
+    for fmt in ("%d/%Y/%m",):  # (evitar confusión) no aplicar
+        pass  # placeholder para claridad
+
+    # DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"):
+        try:
+            dt = datetime.strptime(t, fmt)
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            continue
+
+    raise ValueError("fecha")
+
+def parse_hora(texto: str) -> str:
+    """
+    Acepta:
+      - HH:MM (24h) -> 00..23 : 00..59
+      - H:MM am/pm  o HH:MMam / HH:MM pm
+      - H.MM  (reemplaza punto por dos puntos)
+      - 'ahora' -> hora actual redondeada a minuto
+    Devuelve HH:MM (24h) o lanza ValueError.
+    """
+    t = texto.strip().lower().replace(" ", "")
+    if t == "ahora":
+        return datetime.now().strftime("%H:%M")
+
+    # Permitir H.MM
+    if re.fullmatch(r"\d{1,2}\.\d{2}", t):
+        t = t.replace(".", ":")
+
+    # 24h
+    if re.fullmatch(r"\d{1,2}:\d{2}", t):
+        try:
+            dt = datetime.strptime(t, "%H:%M")
+            return dt.strftime("%H:%M")
+        except Exception:
+            pass
+
+    # 12h con am/pm (ej: 2:30pm, 12:05 am)
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})(am|pm)", t)
+    if m:
+        h = int(m.group(1))
+        mm = int(m.group(2))
+        ap = m.group(3)
+        if not (1 <= h <= 12 and 0 <= mm <= 59):
+            raise ValueError("hora")
+        if ap == "am":
+            h24 = 0 if h == 12 else h
+        else:  # pm
+            h24 = 12 if h == 12 else h + 12
+        return f"{h24:02d}:{mm:02d}"
+
+    raise ValueError("hora")
 
 # ---------- FSM: Flujo de Permiso ----------
 class PermisoForm(StatesGroup):
@@ -84,7 +171,7 @@ def _make_pdf(datos: dict) -> str:
     c.save()
     return path
 
-# ---------- HANDLERS (comandos del bot) ----------
+# ---------- HANDLERS ----------
 @dp.message_handler(Command("start"))
 async def cmd_start(m: types.Message):
     await m.answer(
@@ -115,32 +202,32 @@ async def permiso_motivo(m: types.Message, state: FSMContext):
 @dp.message_handler(state=PermisoForm.destino, content_types=types.ContentTypes.TEXT)
 async def permiso_destino(m: types.Message, state: FSMContext):
     await state.update_data(destino=m.text.strip())
-    await m.answer("Fecha (formato YYYY-MM-DD):")
+    await m.answer("Fecha (acepto `YYYY-MM-DD`, `DD/MM/YYYY`, `DD-MM-YYYY`, `hoy`, `mañana`):")
     await PermisoForm.fecha.set()
 
 @dp.message_handler(state=PermisoForm.fecha, content_types=types.ContentTypes.TEXT)
 async def permiso_fecha(m: types.Message, state: FSMContext):
-    fecha = m.text.strip()
+    raw = m.text.strip()
     try:
-        datetime.strptime(fecha, "%Y-%m-%d")
-    except Exception:
-        await m.answer("❌ Formato inválido. Usa YYYY-MM-DD. Intenta de nuevo:")
+        fecha_norm = parse_fecha(raw)
+    except ValueError:
+        await m.answer("❌ Formato inválido.\nEjemplos válidos: `2025-08-10`, `10/08/2025`, `hoy`, `mañana`.\nIntenta de nuevo:")
         return
-    await state.update_data(fecha=fecha)
-    await m.answer("Hora (formato HH:MM 24h):")
+    await state.update_data(fecha=fecha_norm)
+    await m.answer("Hora (acepto `14:30`, `2:30pm`, `2:30 pm`, `14.30`, `ahora`):")
     await PermisoForm.hora.set()
 
 @dp.message_handler(state=PermisoForm.hora, content_types=types.ContentTypes.TEXT)
 async def permiso_hora(m: types.Message, state: FSMContext):
-    hora = m.text.strip()
+    raw = m.text.strip()
     try:
-        datetime.strptime(hora, "%H:%M")
-    except Exception:
-        await m.answer("❌ Formato inválido. Usa HH:MM (24h). Intenta de nuevo:")
+        hora_norm = parse_hora(raw)
+    except ValueError:
+        await m.answer("❌ Formato inválido. Ejemplos: `14:30`, `2:30pm`, `09:05`, `ahora`. Intenta de nuevo:")
         return
 
     datos = await state.get_data()
-    datos["hora"] = hora
+    datos["hora"] = hora_norm
     datos["folio"] = f"P-{m.from_user.id}-{int(datetime.now().timestamp())}"
 
     # Generar PDF
@@ -149,7 +236,9 @@ async def permiso_hora(m: types.Message, state: FSMContext):
         "✅ Permiso generado\n"
         f"Folio: {datos['folio']}\n"
         f"Nombre: {datos['nombre']}\n"
-        f"Fecha: {datos['fecha']}  {datos['hora']}"
+        f"Motivo: {datos['motivo']}\n"
+        f"Destino: {datos['destino']}\n"
+        f"Fecha/Hora: {datos['fecha']}  {datos['hora']}"
     )
     try:
         with open(path, "rb") as f:
@@ -165,14 +254,14 @@ async def permiso_hora(m: types.Message, state: FSMContext):
 @dp.message_handler(Command("cancel"), state="*")
 async def cmd_cancel(m: types.Message, state: FSMContext):
     await state.finish()
-    await m.answer("🛑 Proceso cancelado.")
+    await m.answer("🛑 Proceso cancelado. Usa /permiso para empezar de nuevo.")
 
-# Catch-all: si escriben algo que no es comando durante estado libre.
+# Fallback: cualquier texto fuera del flujo
 @dp.message_handler()
 async def fallback(msg: types.Message, state: FSMContext):
-    await msg.answer(f"Te leí: {msg.text}")
+    await msg.answer("No entendí. Usa /permiso para generar un PDF o /start para ver ayuda.")
 
-# ---------- LIFESPAN (webhook) ----------
+# ---------- LIFESPAN: set/unset webhook al iniciar/parar ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Iniciando bot...")
@@ -184,36 +273,25 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️ BASE_URL no configurada. Sin webhook.")
     yield
     logger.info("🛑 Cerrando bot...")
-    await bot.delete_webhook()
-    await bot.session.close()
+    try:
+        await bot.delete_webhook()
+    except Exception:
+        pass
+    # aviso: get_session() es la forma nueva (evita DeprecationWarning)
+    try:
+        session = await bot.get_session()
+        await session.close()
+    except Exception:
+        pass
 
 # ---------- FASTAPI ----------
 app = FastAPI(title="Bot Permisos Digitales", lifespan=lifespan)
 
-# === RUTA POST /webhook ===
-# Telegram manda aquí los updates (mensajes/comandos).
-# Procesamos el update con aiogram.
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    try:
-        data = await request.json()
-        logger.info(f"UPDATE ENTRANTE: {data}")  # visible en logs de Render
-
-        # Asegurar contexto válido ANTES de procesar (extra por si acaso):
-        Bot.set_current(bot)
-        Dispatcher.set_current(dp)
-
-        update = Update(**data)  # requiere pydantic<2
-        await dp.process_update(update)
-        return {"ok": True}
-    except Exception as e:
-        logger.exception("Error en webhook")
-        raise HTTPException(status_code=400, detail=str(e))
-
-# === RUTA GET / ===
-# Healthcheck sencillo para ver que el servicio corre y cuál es el webhook actual.
 @app.get("/")
 def health():
+    """
+    Healthcheck. Útil para ver si la app corre y qué webhook quedó.
+    """
     return {
         "ok": True,
         "service": "Bot Permisos Digitales",
@@ -221,11 +299,34 @@ def health():
         "webhook_url": f"{BASE_URL}/webhook" if BASE_URL else "no configurado",
     }
 
-# === RUTA GET /info ===
-# Info mínima para depurar: si el token y la BASE_URL están cargados.
 @app.get("/info")
 def info():
+    """
+    Info rápida de configuración.
+    """
     return {
         "bot_token_configured": bool(BOT_TOKEN),
         "base_url_configured": bool(BASE_URL),
     }
+
+@app.get("/webhook")
+def webhook_ping():
+    """
+    GET /webhook: solo para probar desde el navegador (Telegram usa POST).
+    """
+    return {"ok": True, "detail": "Webhook GET listo (Telegram usará POST)."}
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """
+    POST /webhook: Telegram enviará aquí los updates.
+    """
+    try:
+        data = await request.json()
+        logger.info(f"UPDATE ENTRANTE: {data}")   # visible en logs de Render
+        update = Update(**data)
+        await dp.process_update(update)
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("Error en webhook")
+        raise HTTPException(status_code=400, detail=str(e))
