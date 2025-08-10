@@ -2,7 +2,7 @@
 # -------------------------------------------------------------
 # Bot de Telegram (Aiogram v2) + FastAPI con webhook en Render
 # PDF sobre plantilla PyMuPDF (fitz) + QR
-# Folio autoincremental y archivos en Supabase Storage
+# Folio autoincremental y archivos en Supabase Storage (service_role)
 # -------------------------------------------------------------
 
 import os
@@ -37,13 +37,18 @@ BASE_URL = os.getenv("BASE_URL", "")  # ej: https://tuapp.onrender.com
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN no está configurado")
 
-SUPABASE_URL = "https://xsagwqepoljfsogusubw.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzYWd3cWVwb2xqZnNvZ3VzdWJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDM5NjM3NTUsImV4cCI6MjA1OTUzOTc1NX0.NUixULn0m2o49At8j6X58UqbXre2O2_JStqzls_8Gws"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")  # service_role
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise ValueError("SUPABASE_URL y/o SUPABASE_SERVICE_KEY no están configurados")
+
+# Storage
 BUCKET = "pdfs"
 OUTPUT_DIR = "static/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Cliente Supabase con service_role (RLS bypass)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ---------- BOT ----------
 storage = MemoryStorage()
@@ -71,7 +76,7 @@ def _slug_filename(name: str) -> str:
     return safe
 
 def generar_folio_automatico(prefijo="05") -> str:
-    # Busca último folio que empiece con prefijo y autoincrementa
+    """Busca el último folio (desc) y autoincrementa el sufijo numérico."""
     try:
         res = (
             supabase.table("borradores_registros")
@@ -82,7 +87,9 @@ def generar_folio_automatico(prefijo="05") -> str:
         )
         if res.data:
             ultimo = str(res.data[0]["folio"])
-            num = int(re.sub(rf"^{re.escape(prefijo)}", "", ultimo)) + 1
+            # extrae parte numérica al final, quitando prefijo
+            m = re.match(rf"^{re.escape(prefijo)}(\d+)$", ultimo)
+            num = int(m.group(1)) + 1 if m else 1
         else:
             num = 1
     except Exception:
@@ -90,17 +97,14 @@ def generar_folio_automatico(prefijo="05") -> str:
     return f"{prefijo}{num:04d}"
 
 def subir_pdf_supabase(path_local: str, nombre_pdf: str) -> str:
-    nombre_pdf = _slug_filename(nombre_pdf)
+    """Sube PDF al bucket con upsert=true y devuelve URL pública."""
+    nombre_pdf = _slug_filename(nombre_pdf)  # sin slash inicial
     with open(path_local, "rb") as f:
         data = f.read()
-    # Upsert para evitar 400 'Duplicado'
     supabase.storage.from_(BUCKET).upload(
-        nombre_pdf,
-        data,
-        file_options={
-            "content-type": "application/pdf",
-            "x-upsert": "true",
-        },
+        path=nombre_pdf,
+        file=data,
+        file_options={"contentType": "application/pdf", "upsert": True},
     )
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
 
@@ -134,7 +138,12 @@ def _make_pdf(datos: dict) -> str:
     # Fechas
     fecha_exp = datetime.now()
     fecha_ven = fecha_exp + timedelta(days=30)
-    fecha_visual = fecha_exp.strftime("%d DE %B DEL %Y").upper()
+    # Mes en español (sin depender de locale del contenedor)
+    meses = {
+        1:"ENERO",2:"FEBRERO",3:"MARZO",4:"ABRIL",5:"MAYO",6:"JUNIO",
+        7:"JULIO",8:"AGOSTO",9:"SEPTIEMBRE",10:"OCTUBRE",11:"NOVIEMBRE",12:"DICIEMBRE"
+    }
+    fecha_visual = f"{fecha_exp.day:02d} DE {meses[fecha_exp.month]} DEL {fecha_exp.year}"
     vigencia_visual = fecha_ven.strftime("%d/%m/%Y")
 
     # Texto principal
@@ -241,7 +250,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
         # Generar PDF local
         path_pdf = _make_pdf(datos)
 
-        # Subir con nombre seguro y único
+        # Subir con nombre seguro y único (evita colisiones)
         nombre_pdf = _slug_filename(f"{datos['folio']}_cdmx_{int(time.time())}.pdf")
         url_pdf = subir_pdf_supabase(path_pdf, nombre_pdf)
 
