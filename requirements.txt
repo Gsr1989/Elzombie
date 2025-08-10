@@ -1,13 +1,14 @@
 aiogram==2.25.1
 fastapi==0.110.0
 uvicorn==0.29.0
+reportlab==4.2.0
 pydantic<2
 
-# Supabase y compat
-supabase==2.3.5
-httpx<0.26
+# Supabase y compatibilidad
+supabase==2.4.0
+httpx==0.27.0
 
 # PDF plantilla y QR
-pymupdf==1.24.9     # (import fitz)
+pymupdf==1.24.9
 qrcode==7.4.2
 pillow==10.4.0
