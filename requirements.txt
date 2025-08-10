@@ -3,12 +3,12 @@ fastapi==0.110.0
 uvicorn==0.29.0
 pydantic<2
 
-# Supabase (conjunto compatible)
+# Supabase stack (combo compatible)
 supabase==2.3.1
-gotrue==2.2.0
-httpx==0.25.2
+gotrue==2.12.4
+httpx==0.26.0
 
-# PDF/QR
+# PDF / QR
 pymupdf==1.24.9
 qrcode==7.4.2
 pillow==10.4.0
