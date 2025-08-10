@@ -3,8 +3,12 @@ fastapi==0.110.0
 uvicorn==0.29.0
 reportlab==4.2.0
 pydantic<2
+
+# Supabase y su compat
 supabase==2.3.5
 httpx<0.26
-pillow==10.3.0
-qrcode[pil]==7.4.2
-typing_extensions==4.12.2
+
+# PDF plantilla y QR
+pymupdf==1.24.9     # (import fitz)
+qrcode==7.4.2
+pillow==10.4.0
