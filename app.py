@@ -29,6 +29,11 @@ storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=storage)
 
+# **FIX CONTEXTO**: Aiogram necesita saber cuál es el bot/dispatcher "actual".
+# Esto evita el error "No se puede obtener la instancia del bot del contexto".
+Bot.set_current(bot)
+Dispatcher.set_current(dp)
+
 # ---------- FSM: Flujo de Permiso ----------
 class PermisoForm(StatesGroup):
     nombre = State()
@@ -79,7 +84,7 @@ def _make_pdf(datos: dict) -> str:
     c.save()
     return path
 
-# ---------- HANDLERS ----------
+# ---------- HANDLERS (comandos del bot) ----------
 @dp.message_handler(Command("start"))
 async def cmd_start(m: types.Message):
     await m.answer(
@@ -162,6 +167,11 @@ async def cmd_cancel(m: types.Message, state: FSMContext):
     await state.finish()
     await m.answer("🛑 Proceso cancelado.")
 
+# Catch-all: si escriben algo que no es comando durante estado libre.
+@dp.message_handler()
+async def fallback(msg: types.Message, state: FSMContext):
+    await msg.answer(f"Te leí: {msg.text}")
+
 # ---------- LIFESPAN (webhook) ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -169,7 +179,7 @@ async def lifespan(app: FastAPI):
     if BASE_URL:
         webhook_url = f"{BASE_URL}/webhook"
         await bot.set_webhook(webhook_url)
-        logger.info(f"✅ Webhook: {webhook_url}")
+        logger.info(f"✅ Webhook configurado: {webhook_url}")
     else:
         logger.warning("⚠️ BASE_URL no configurada. Sin webhook.")
     yield
@@ -180,18 +190,28 @@ async def lifespan(app: FastAPI):
 # ---------- FASTAPI ----------
 app = FastAPI(title="Bot Permisos Digitales", lifespan=lifespan)
 
+# === RUTA POST /webhook ===
+# Telegram manda aquí los updates (mensajes/comandos).
+# Procesamos el update con aiogram.
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     try:
         data = await request.json()
-        logger.info(f"UPDATE ENTRANTE: {data}")   # <— log visible en Render
-        update = Update(**data)
+        logger.info(f"UPDATE ENTRANTE: {data}")  # visible en logs de Render
+
+        # Asegurar contexto válido ANTES de procesar (extra por si acaso):
+        Bot.set_current(bot)
+        Dispatcher.set_current(dp)
+
+        update = Update(**data)  # requiere pydantic<2
         await dp.process_update(update)
         return {"ok": True}
     except Exception as e:
         logger.exception("Error en webhook")
         raise HTTPException(status_code=400, detail=str(e))
-        
+
+# === RUTA GET / ===
+# Healthcheck sencillo para ver que el servicio corre y cuál es el webhook actual.
 @app.get("/")
 def health():
     return {
@@ -201,13 +221,11 @@ def health():
         "webhook_url": f"{BASE_URL}/webhook" if BASE_URL else "no configurado",
     }
 
+# === RUTA GET /info ===
+# Info mínima para depurar: si el token y la BASE_URL están cargados.
 @app.get("/info")
 def info():
     return {
         "bot_token_configured": bool(BOT_TOKEN),
         "base_url_configured": bool(BASE_URL),
-}
-
-@dp.message_handler()
-async def fallback(msg: types.Message, state: FSMContext):
-    await msg.answer(f"Te leí: {msg.text}")
+    }
