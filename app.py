@@ -184,13 +184,14 @@ app = FastAPI(title="Bot Permisos Digitales", lifespan=lifespan)
 async def telegram_webhook(request: Request):
     try:
         data = await request.json()
+        logger.info(f"UPDATE ENTRANTE: {data}")   # <— log visible en Render
         update = Update(**data)
         await dp.process_update(update)
         return {"ok": True}
     except Exception as e:
         logger.exception("Error en webhook")
         raise HTTPException(status_code=400, detail=str(e))
-
+        
 @app.get("/")
 def health():
     return {
