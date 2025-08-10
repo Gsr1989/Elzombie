@@ -5,8 +5,8 @@ reportlab==4.2.0
 pydantic<2
 
 # Supabase + compat
-supabase==2.4.0
-httpx==0.25.2
+supabase==2.3.5
+httpx==0.25.2   # (o simplemente httpx<0.26)
 
 # PDF plantilla y QR
 pymupdf==1.24.9
