@@ -318,15 +318,22 @@ def webhook_ping():
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    """
-    POST /webhook: Telegram enviará aquí los updates.
-    """
+    data = await request.json()
+    logger.info(f"UPDATE ENTRANTE: {data}")
+
     try:
-        data = await request.json()
-        logger.info(f"UPDATE ENTRANTE: {data}")   # visible en logs de Render
-        update = Update(**data)
-        await dp.process_update(update)
-        return {"ok": True}
+        update = types.Update(**data)  # pydantic v1
     except Exception as e:
-        logger.exception("Error en webhook")
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception(f"❌ No pude parsear Update: {e}")
+        # devolvemos 200 para que Telegram no reintente
+        return {"ok": True, "note": "parse_failed"}
+
+    try:
+        await dp.process_update(update)
+    except Exception as e:
+        # LOG COMPLETO del error dentro de aiogram (handlers)
+        logger.exception(f"❌ Error procesando update: {e}")
+        # IMPORTANTE: devolver 200 para no generar 400 en Telegram
+        return {"ok": True, "note": "handler_failed"}
+
+    return {"ok": True}
