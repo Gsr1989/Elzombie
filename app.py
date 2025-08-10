@@ -23,14 +23,12 @@ dp = Dispatcher(bot)
 
 # /start
 @dp.message_handler(Command("start"))
-async def start_handler(message: types.Message):
-    await message.answer("🚀 ¡Hola! Soy tu bot de permisos digitales.\n"
-                         "Estoy funcionando en Render y listo para trabajar. 😎")
+async def start(msg: types.Message):
+    await msg.answer("🚀 ¡Hola! Bot arriba en Render.")
 
-# Echo
 @dp.message_handler()
-async def echo_handler(message: types.Message):
-    await message.answer(f"📝 Me dijiste: {message.text}")
+async def echo(msg: types.Message):
+    await msg.answer(f"📝 Me dijiste: {msg.text}")
 
 # Ciclo de vida
 @asynccontextmanager
