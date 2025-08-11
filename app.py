@@ -1,11 +1,3 @@
-# app.py
-# -------------------------------------------------------------
-# Bot de Telegram (Aiogram v2) + FastAPI (webhook en Render)
-# Genera PDF (PyMuPDF/fitz) con QR, sube a Supabase Storage
-# Guarda registro en Supabase (usa service_role, bypass RLS)
-# Folio único con tabla folios_unicos (id bigserial)
-# -------------------------------------------------------------
-
 import os
 import re
 import time
@@ -46,6 +38,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 
 # Storage
 BUCKET = os.getenv("BUCKET", "pdfs")
+# /tmp para evitar reloads automáticos del server
 OUTPUT_DIR = "/tmp/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -78,11 +71,15 @@ def _slug_filename(name: str) -> str:
     return safe
 
 def nuevo_folio(prefijo: str = "05") -> str:
-    ins = supabase.table("folios_unicos").insert({}).execute()
+    """Genera folio único con public.folios_registrados (id bigserial)."""
+    ins = supabase.table("folios_unicos").insert({
+        "prefijo": prefijo  # Aquí se incluye el prefijo
+    }).execute()
     nid = int(ins.data[0]["id"])
     return f"{prefijo}{nid:06d}"
 
 def subir_pdf_supabase(path_local: str, nombre_pdf: str) -> str:
+    """Sube el PDF al bucket y devuelve la URL pública."""
     nombre_pdf = _slug_filename(nombre_pdf)
     with open(path_local, "rb") as f:
         data = f.read()
@@ -243,7 +240,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
             await m.answer_document(f, caption=caption)
 
         payload = {
-            "fol": datos["folio"],
+            "folio": datos["folio"],
             "marca": datos["marca"],
             "linea": datos["linea"],
             "anio": str(datos["anio"]),
@@ -271,6 +268,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
     finally:
         await state.finish()
 
+# Fallback
 @dp.message_handler()
 async def fallback(m: types.Message):
     await m.answer("No entendí. Usa /permiso para iniciar.")
