@@ -2,14 +2,13 @@
 # -------------------------------------------------------------
 # Bot de Telegram (Aiogram v2) + FastAPI (webhook en Render)
 # Genera PDF (PyMuPDF/fitz) con QR, sube a Supabase Storage
-# Guarda registro en Supabase (service_role, bypass RLS)
-# Folio único con tabla folios_registrados (id bigserial, folio NOT NULL)
+# Guarda registro en Supabase (usa service_role, bypass RLS)
+# Folio único con tabla folios_registrados (id bigserial)
 # -------------------------------------------------------------
 
 import os
 import re
 import time
-import uuid
 import unicodedata
 import logging
 import asyncio
@@ -47,7 +46,8 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 
 # Storage
 BUCKET = os.getenv("BUCKET", "pdfs")
-OUTPUT_DIR = "static/pdfs"
+# /tmp para evitar reloads automáticos del server
+OUTPUT_DIR = "/tmp/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Cliente Supabase con service_role (bypass RLS)
@@ -79,40 +79,16 @@ def _slug_filename(name: str) -> str:
     return safe
 
 def nuevo_folio(prefijo: str = "05") -> str:
-    """
-    Genera folio garantizado-único.
-    La tabla 'folios_registrados' en tu DB tiene:
-      id BIGSERIAL PK, folio TEXT NOT NULL (y opcional UNIQUE).
-    Para cumplir NOT NULL, insertamos un placeholder único, luego
-    calculamos el folio final con el id y actualizamos esa fila.
-    """
-    try:
-        placeholder = f"PENDING-{uuid.uuid4().hex[:8]}"
-        ins = (
-            supabase.table("folios_registrados")
-            .insert({"folio": placeholder})
-            .select("id")
-            .execute()
-        )
-        nid = int(ins.data[0]["id"])
-        folio = f"{prefijo}{nid:06d}"  # 05000001, 05000002, ...
-
-        supabase.table("folios_registrados").update({"folio": folio}).eq("id", nid).execute()
-        return folio
-    except Exception as e:
-        logger.warning(f"nuevo_folio() falló, uso fallback: {e}")
-        # Fallback para no parar el flujo si la tabla no coincide con lo esperado
-        return f"{prefijo}{int(time.time()) % 1_000_000:06d}"
+    """Genera folio único con public.folios_registrados (id bigserial)."""
+    ins = supabase.table("folios_registrados").insert({}).execute()
+    nid = int(ins.data[0]["id"])
+    return f"{prefijo}{nid:06d}"
 
 def subir_pdf_supabase(path_local: str, nombre_pdf: str) -> str:
-    """
-    Sube el PDF al bucket y devuelve la URL pública.
-    (No usamos upsert para evitar bugs de encode).
-    """
-    nombre_pdf = _slug_filename(nombre_pdf)  # sin slash inicial
+    """Sube el PDF al bucket y devuelve la URL pública."""
+    nombre_pdf = _slug_filename(nombre_pdf)
     with open(path_local, "rb") as f:
         data = f.read()
-
     supabase.storage.from_(BUCKET).upload(
         nombre_pdf,
         data,
@@ -134,10 +110,6 @@ class PermisoForm(StatesGroup):
 
 # ---------- PDF ----------
 def _make_pdf(datos: dict) -> str:
-    """
-    Rellena la plantilla 'cdmxdigital2025ppp.pdf' con coords fijas y genera QR.
-    Devuelve ruta local del PDF.
-    """
     plantilla = os.path.join(os.path.dirname(__file__), "cdmxdigital2025ppp.pdf")
     if not os.path.exists(plantilla):
         raise FileNotFoundError(f"No se encontró la plantilla: {plantilla}")
@@ -147,7 +119,6 @@ def _make_pdf(datos: dict) -> str:
     doc = fitz.open(plantilla)
     pg = doc[0]
 
-    # Fechas para imprimir
     fecha_exp = datetime.now()
     fecha_ven = fecha_exp + timedelta(days=30)
     meses = {
@@ -157,7 +128,6 @@ def _make_pdf(datos: dict) -> str:
     fecha_visual = f"{fecha_exp.day:02d} DE {meses[fecha_exp.month]} DEL {fecha_exp.year}"
     vigencia_visual = fecha_ven.strftime("%d/%m/%Y")
 
-    # Texto principal
     pg.insert_text(coords_cdmx["folio"][:2], datos["folio"],
                    fontsize=coords_cdmx["folio"][2], color=coords_cdmx["folio"][3])
     pg.insert_text(coords_cdmx["fecha"][:2], fecha_visual,
@@ -172,7 +142,6 @@ def _make_pdf(datos: dict) -> str:
     pg.insert_text(coords_cdmx["nombre"][:2], datos["nombre"],
                    fontsize=coords_cdmx["nombre"][2], color=coords_cdmx["nombre"][3])
 
-    # QR
     qr_text = (
         f"Folio: {datos['folio']}\n"
         f"Marca: {datos['marca']}\n"
@@ -196,8 +165,7 @@ def _make_pdf(datos: dict) -> str:
     qr_png = os.path.join(OUTPUT_DIR, f"{datos['folio']}_qr.png")
     img.save(qr_png)
 
-    # Colocar QR (coordenadas exactas)
-    tam_qr = 1.6 * 28.35  # ~1.6 cm en puntos
+    tam_qr = 1.6 * 28.35
     ancho_pagina = pg.rect.width
     x0 = (ancho_pagina / 2) - (tam_qr / 2) - 19
     x1 = (ancho_pagina / 2) + (tam_qr / 2) - 19
@@ -255,29 +223,19 @@ async def form_motor(m: types.Message, state: FSMContext):
 async def form_nombre(m: types.Message, state: FSMContext):
     datos = await state.get_data()
     datos["nombre"] = m.text.strip()
+    datos["folio"]  = nuevo_folio("05")
 
-    # Generar folio aquí, y si falla NO reventar el handler
-    try:
-        datos["folio"] = nuevo_folio("05")
-    except Exception as e:
-        logger.warning(f"Fallo al generar folio (wrapper): {e}")
-        datos["folio"] = f"05{int(time.time()) % 1_000_000:06d}"
-
-    # Fechas para la BD (evita NOT NULL)
     fecha_exp = datetime.now().date()
     fecha_ven = (datetime.now() + timedelta(days=30)).date()
 
     await m.answer("⏳ Generando tu PDF, dame unos segundos...")
 
     try:
-        # 1) Generar PDF SIN bloquear el event loop
         path_pdf = await asyncio.to_thread(_make_pdf, datos)
 
-        # 2) Subir a Storage SIN bloquear
         nombre_pdf = _slug_filename(f"{datos['folio']}_cdmx_{int(time.time())}.pdf")
         url_pdf    = await asyncio.to_thread(subir_pdf_supabase, path_pdf, nombre_pdf)
 
-        # 3) Enviar el PDF al usuario
         caption = (
             f"✅ Registro creado\n"
             f"Folio: {datos['folio']}\n"
@@ -287,9 +245,8 @@ async def form_nombre(m: types.Message, state: FSMContext):
         with open(path_pdf, "rb") as f:
             await m.answer_document(f, caption=caption)
 
-        # 4) Guardar en Supabase SIN bloquear (con campos NOT NULL)
         payload = {
-            "folio": datos["folio"],
+            "fol": datos["folio"],  # <<< columna en tu tabla
             "marca": datos["marca"],
             "linea": datos["linea"],
             "anio": str(datos["anio"]),
@@ -300,9 +257,10 @@ async def form_nombre(m: types.Message, state: FSMContext):
             "url_pdf": url_pdf,
             "fecha_expedicion": fecha_exp.isoformat(),
             "fecha_vencimiento": fecha_ven.isoformat(),
-            # por si existen NOT NULL extras:
-            "color": datos.get("color", "N/A"),
-            "contribuyente": datos.get("contribuyente", "N/A"),
+            "color": datos.get("color", "NULO"),
+            "contribuyente": datos.get("contribuyente", "NULO"),
+            "placa": datos.get("placa", "NULO"),
+            "tipo": datos.get("tipo", "NULO"),
         }
         try:
             await asyncio.to_thread(guardar_supabase, payload)
@@ -348,7 +306,6 @@ async def telegram_webhook(request: Request):
     logger.info(f"permiso-bot:UPDATE: {data}")
     update = types.Update(**data)
 
-    # Necesario en Aiogram v2 al usar webhook manual
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
 
