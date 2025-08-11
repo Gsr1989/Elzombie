@@ -245,22 +245,25 @@ async def form_motor(m: types.Message, state: FSMContext):
     await m.answer("Nombre del solicitante:")
     await PermisoForm.nombre.set()
 
+import asyncio
+
 @dp.message_handler(state=PermisoForm.nombre, content_types=types.ContentTypes.TEXT)
 async def form_nombre(m: types.Message, state: FSMContext):
-    # Reúne datos del formulario
     datos = await state.get_data()
     datos["nombre"] = m.text.strip()
-    datos["folio"] = generar_folio_automatico("05")
+    datos["folio"]  = generar_folio_automatico("05")
+
+    await m.answer("⏳ Generando tu PDF, dame unos segundos...")
 
     try:
-        # 1) Generar PDF local
-        path_pdf = _make_pdf(datos)
+        # 1) Generar PDF SIN bloquear el event loop
+        path_pdf = await asyncio.to_thread(_make_pdf, datos)
 
-        # 2) Subir a Supabase Storage con nombre único
+        # 2) Subir a Storage SIN bloquear
         nombre_pdf = _slug_filename(f"{datos['folio']}_cdmx_{int(time.time())}.pdf")
-        url_pdf = subir_pdf_supabase(path_pdf, nombre_pdf)
+        url_pdf    = await asyncio.to_thread(subir_pdf_supabase, path_pdf, nombre_pdf)
 
-        # 3) Enviar el PDF al chat (pase lo que pase con la BD)
+        # 3) Enviar el PDF al usuario (esto sí es async)
         caption = (
             f"✅ Registro creado\n"
             f"Folio: {datos['folio']}\n"
@@ -270,21 +273,23 @@ async def form_nombre(m: types.Message, state: FSMContext):
         with open(path_pdf, "rb") as f:
             await m.answer_document(f, caption=caption)
 
-        # 4) Guardar en Supabase (no bloquea el envío del PDF)
+        # 4) Guardar en Supabase SIN bloquear (y con campos NOT NULL)
+        payload = {
+            "folio": datos["folio"],
+            "marca": datos["marca"],
+            "linea": datos["linea"],
+            "anio": str(datos["anio"]),
+            "numero_serie": datos["serie"],
+            "numero_motor": datos["motor"],
+            "nombre": datos["nombre"],
+            "entidad": "CDMX",
+            "url_pdf": url_pdf,
+            # evita errores NOT NULL si existen esas columnas:
+            "color": datos.get("color", "N/A"),
+            "contribuyente": datos.get("contribuyente", "N/A"),
+        }
         try:
-            guardar_supabase({
-                "folio": datos["folio"],
-                "marca": datos["marca"],
-                "linea": datos["linea"],
-                "anio": str(datos["anio"]),
-                "numero_serie": datos["serie"],
-                "numero_motor": datos["motor"],
-                "nombre": datos["nombre"],
-                "entidad": "CDMX",
-                "url_pdf": url_pdf,
-                # Si tu columna 'color' es NOT NULL, deja este default:
-                "color": datos.get("color", "N/A"),
-            })
+            await asyncio.to_thread(guardar_supabase, payload)
         except Exception as e:
             logger.warning(f"No se pudo guardar en Supabase: {e}")
             await m.answer("⚠️ No se pudo guardar en la base, pero tu PDF ya fue generado.")
@@ -292,8 +297,8 @@ async def form_nombre(m: types.Message, state: FSMContext):
     except Exception as e:
         logger.exception("Error generando/enviando PDF")
         await m.answer(f"❌ Error generando PDF: {e}")
-
-    await state.finish()
+    finally:
+        await state.finish()
 
 # Fallback
 @dp.message_handler()
