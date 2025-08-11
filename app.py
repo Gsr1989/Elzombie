@@ -247,31 +247,20 @@ async def form_motor(m: types.Message, state: FSMContext):
 
 @dp.message_handler(state=PermisoForm.nombre, content_types=types.ContentTypes.TEXT)
 async def form_nombre(m: types.Message, state: FSMContext):
+    # Reúne datos del formulario
     datos = await state.get_data()
     datos["nombre"] = m.text.strip()
     datos["folio"] = generar_folio_automatico("05")
 
     try:
-        # Generar PDF local
+        # 1) Generar PDF local
         path_pdf = _make_pdf(datos)
 
-        # Subir con nombre seguro y único (evita colisiones)
+        # 2) Subir a Supabase Storage con nombre único
         nombre_pdf = _slug_filename(f"{datos['folio']}_cdmx_{int(time.time())}.pdf")
         url_pdf = subir_pdf_supabase(path_pdf, nombre_pdf)
 
-        # Guardar registro
-        guardar_supabase({
-            "folio": datos["folio"],
-            "marca": datos["marca"],
-            "linea": datos["linea"],
-            "anio": datos["anio"],
-            "numero_serie": datos["serie"],
-            "numero_motor": datos["motor"],
-            "nombre": datos["nombre"],
-            "entidad": "CDMX",
-            "url_pdf": url_pdf
-        })
-
+        # 3) Enviar el PDF al chat (pase lo que pase con la BD)
         caption = (
             f"✅ Registro creado\n"
             f"Folio: {datos['folio']}\n"
@@ -280,6 +269,25 @@ async def form_nombre(m: types.Message, state: FSMContext):
         )
         with open(path_pdf, "rb") as f:
             await m.answer_document(f, caption=caption)
+
+        # 4) Guardar en Supabase (no bloquea el envío del PDF)
+        try:
+            guardar_supabase({
+                "folio": datos["folio"],
+                "marca": datos["marca"],
+                "linea": datos["linea"],
+                "anio": str(datos["anio"]),
+                "numero_serie": datos["serie"],
+                "numero_motor": datos["motor"],
+                "nombre": datos["nombre"],
+                "entidad": "CDMX",
+                "url_pdf": url_pdf,
+                # Si tu columna 'color' es NOT NULL, deja este default:
+                "color": datos.get("color", "N/A"),
+            })
+        except Exception as e:
+            logger.warning(f"No se pudo guardar en Supabase: {e}")
+            await m.answer("⚠️ No se pudo guardar en la base, pero tu PDF ya fue generado.")
 
     except Exception as e:
         logger.exception("Error generando/enviando PDF")
