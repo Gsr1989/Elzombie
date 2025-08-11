@@ -46,7 +46,8 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 
 # Storage
 BUCKET = os.getenv("BUCKET", "pdfs")
-OUTPUT_DIR = "static/pdfs"
+# Importante: /tmp para evitar que Render/Uvicorn haga reload al escribir archivos
+OUTPUT_DIR = "/tmp/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Cliente Supabase con service_role (bypass RLS)
