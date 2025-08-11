@@ -1,8 +1,8 @@
 # app.py
 # -------------------------------------------------------------
-# Bot de Telegram (Aiogram v2) + FastAPI con webhook en Render
-# PDF sobre plantilla PyMuPDF (fitz) + QR
-# Folio autoincremental y archivos en Supabase Storage (service_role)
+# Bot de Telegram (Aiogram v2) + FastAPI (webhook en Render)
+# Genera PDF sobre plantilla PyMuPDF (fitz) con QR
+# Guarda registro y sube PDF a Supabase Storage (service_role)
 # -------------------------------------------------------------
 
 import os
@@ -55,7 +55,7 @@ storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=storage)
 
-# ---------- COORDENADAS (NO TOCAR) ----------
+# ---------- COORDENADAS ----------
 coords_cdmx = {
     "folio":   (87, 130, 14, (1, 0, 0)),
     "fecha":   (130, 145, 12, (0, 0, 0)),
@@ -75,7 +75,7 @@ def _slug_filename(name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_only)
     return safe
 
-def generar_folio_automatico(prefijo="05") -> str:
+def generar_folio_automatico(prefijo: str = "05") -> str:
     """Busca el último folio (desc) y autoincrementa el sufijo numérico."""
     try:
         res = (
@@ -96,15 +96,22 @@ def generar_folio_automatico(prefijo="05") -> str:
     return f"{prefijo}{num:04d}"
 
 def subir_pdf_supabase(path_local: str, nombre_pdf: str) -> str:
-    """Sube PDF al bucket con upsert=True y devuelve URL pública."""
+    """
+    Sube el PDF al bucket y devuelve la URL pública.
+    Se evita 'upsert=True' (bug en algunas versiones del SDK).
+    """
     nombre_pdf = _slug_filename(nombre_pdf)  # sin slash inicial
     with open(path_local, "rb") as f:
         data = f.read()
+
+    # Importante: NO pasar upsert=True (provoca 'bool has no attribute encode' en ciertos builds)
     supabase.storage.from_(BUCKET).upload(
-        path=nombre_pdf,
-        file=data,
-        file_options={"contentType": "application/pdf", "upsert": True},
+        nombre_pdf,
+        data,
+        {"contentType": "application/pdf"}  # clave esperada por el SDK v2
     )
+
+    # URL pública (bucket debe ser Public)
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
 
 def guardar_supabase(data: dict) -> None:
@@ -184,7 +191,7 @@ def _make_pdf(datos: dict) -> str:
     img.save(qr_png)
 
     # Colocar QR (coordenadas exactas)
-    tam_qr = 1.6 * 28.35
+    tam_qr = 1.6 * 28.35  # ~1.6 cm en puntos
     ancho_pagina = pg.rect.width
     x0 = (ancho_pagina / 2) - (tam_qr / 2) - 19
     x1 = (ancho_pagina / 2) + (tam_qr / 2) - 19
@@ -309,7 +316,7 @@ def health():
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
-    logger.info(f"permiso-bot:ACTUALIZACIÓN ENTRANTE: {data}")
+    logger.info(f"permiso-bot:UPDATE: {data}")
     update = types.Update(**data)
 
     # Necesario en Aiogram v2 al usar webhook manual
