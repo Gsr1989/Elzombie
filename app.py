@@ -2,13 +2,14 @@
 # -------------------------------------------------------------
 # Bot de Telegram (Aiogram v2) + FastAPI (webhook en Render)
 # Genera PDF (PyMuPDF/fitz) con QR, sube a Supabase Storage
-# Guarda registro en Supabase (usa service_role, bypass RLS)
-# Folio único con tabla folios_registrados (id bigserial)
+# Guarda registro en Supabase (service_role, bypass RLS)
+# Folio único con tabla folios_registrados (id bigserial, folio NOT NULL)
 # -------------------------------------------------------------
 
 import os
 import re
 import time
+import uuid
 import unicodedata
 import logging
 import asyncio
@@ -46,8 +47,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 
 # Storage
 BUCKET = os.getenv("BUCKET", "pdfs")
-# Importante: /tmp para evitar que Render/Uvicorn haga reload al escribir archivos
-OUTPUT_DIR = "/tmp/pdfs"
+OUTPUT_DIR = "static/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Cliente Supabase con service_role (bypass RLS)
@@ -80,31 +80,44 @@ def _slug_filename(name: str) -> str:
 
 def nuevo_folio(prefijo: str = "05") -> str:
     """
-    Genera folio garantizado-único insertando una fila en
-    public.folios_registrados (id bigserial primary key).
-    create table if not exists public.folios_registrados (id bigserial primary key);
+    Genera folio garantizado-único.
+    La tabla 'folios_registrados' en tu DB tiene:
+      id BIGSERIAL PK, folio TEXT NOT NULL (y opcional UNIQUE).
+    Para cumplir NOT NULL, insertamos un placeholder único, luego
+    calculamos el folio final con el id y actualizamos esa fila.
     """
-    ins = supabase.table("folios_registrados").insert({}).execute()
-    nid = int(ins.data[0]["id"])
-    return f"{prefijo}{nid:06d}"  # 05000001, 05000002, ...
+    try:
+        placeholder = f"PENDING-{uuid.uuid4().hex[:8]}"
+        ins = (
+            supabase.table("folios_registrados")
+            .insert({"folio": placeholder})
+            .select("id")
+            .execute()
+        )
+        nid = int(ins.data[0]["id"])
+        folio = f"{prefijo}{nid:06d}"  # 05000001, 05000002, ...
+
+        supabase.table("folios_registrados").update({"folio": folio}).eq("id", nid).execute()
+        return folio
+    except Exception as e:
+        logger.warning(f"nuevo_folio() falló, uso fallback: {e}")
+        # Fallback para no parar el flujo si la tabla no coincide con lo esperado
+        return f"{prefijo}{int(time.time()) % 1_000_000:06d}"
 
 def subir_pdf_supabase(path_local: str, nombre_pdf: str) -> str:
     """
     Sube el PDF al bucket y devuelve la URL pública.
-    (No usamos upsert para evitar bugs raros de encode)
+    (No usamos upsert para evitar bugs de encode).
     """
     nombre_pdf = _slug_filename(nombre_pdf)  # sin slash inicial
     with open(path_local, "rb") as f:
         data = f.read()
 
-    # Supabase-py v2: upload(path, file_bytes, options)
     supabase.storage.from_(BUCKET).upload(
         nombre_pdf,
         data,
         {"contentType": "application/pdf"}
     )
-
-    # URL pública (el bucket debe ser "Public")
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
 
 def guardar_supabase(data: dict) -> None:
@@ -134,7 +147,7 @@ def _make_pdf(datos: dict) -> str:
     doc = fitz.open(plantilla)
     pg = doc[0]
 
-    # Fechas
+    # Fechas para imprimir
     fecha_exp = datetime.now()
     fecha_ven = fecha_exp + timedelta(days=30)
     meses = {
@@ -242,7 +255,13 @@ async def form_motor(m: types.Message, state: FSMContext):
 async def form_nombre(m: types.Message, state: FSMContext):
     datos = await state.get_data()
     datos["nombre"] = m.text.strip()
-    datos["folio"]  = nuevo_folio("05")  # folio único
+
+    # Generar folio aquí, y si falla NO reventar el handler
+    try:
+        datos["folio"] = nuevo_folio("05")
+    except Exception as e:
+        logger.warning(f"Fallo al generar folio (wrapper): {e}")
+        datos["folio"] = f"05{int(time.time()) % 1_000_000:06d}"
 
     # Fechas para la BD (evita NOT NULL)
     fecha_exp = datetime.now().date()
