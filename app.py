@@ -1,8 +1,9 @@
 # app.py
 # -------------------------------------------------------------
 # Bot de Telegram (Aiogram v2) + FastAPI (webhook en Render)
-# Genera PDF sobre plantilla PyMuPDF (fitz) con QR
-# Guarda registro y sube PDF a Supabase Storage (service_role)
+# Genera PDF (PyMuPDF/fitz) con QR, sube a Supabase Storage
+# Guarda registro en Supabase (usa service_role, bypass RLS)
+# Folio único con tabla folios_registrados (id bigserial)
 # -------------------------------------------------------------
 
 import os
@@ -10,6 +11,7 @@ import re
 import time
 import unicodedata
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 
@@ -75,43 +77,33 @@ def _slug_filename(name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_only)
     return safe
 
-def generar_folio_automatico(prefijo: str = "05") -> str:
-    """Busca el último folio (desc) y autoincrementa el sufijo numérico."""
-    try:
-        res = (
-            supabase.table("borradores_registros")
-            .select("folio")
-            .order("folio", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if res.data:
-            ultimo = str(res.data[0]["folio"])
-            m = re.match(rf"^{re.escape(prefijo)}(\d+)$", ultimo)
-            num = int(m.group(1)) + 1 if m else 1
-        else:
-            num = 1
-    except Exception:
-        num = 1
-    return f"{prefijo}{num:04d}"
+def nuevo_folio(prefijo: str = "05") -> str:
+    """
+    Genera folio garantizado-único insertando una fila en
+    public.folios_registrados (id bigserial primary key).
+    create table if not exists public.folios_registrados (id bigserial primary key);
+    """
+    ins = supabase.table("folios_registrados").insert({}).execute()
+    nid = int(ins.data[0]["id"])
+    return f"{prefijo}{nid:06d}"  # 05000001, 05000002, ...
 
 def subir_pdf_supabase(path_local: str, nombre_pdf: str) -> str:
     """
     Sube el PDF al bucket y devuelve la URL pública.
-    Se evita 'upsert=True' (bug en algunas versiones del SDK).
+    (No usamos upsert para evitar bugs raros de encode)
     """
     nombre_pdf = _slug_filename(nombre_pdf)  # sin slash inicial
     with open(path_local, "rb") as f:
         data = f.read()
 
-    # Importante: NO pasar upsert=True (provoca 'bool has no attribute encode' en ciertos builds)
+    # Supabase-py v2: upload(path, file_bytes, options)
     supabase.storage.from_(BUCKET).upload(
         nombre_pdf,
         data,
-        {"contentType": "application/pdf"}  # clave esperada por el SDK v2
+        {"contentType": "application/pdf"}
     )
 
-    # URL pública (bucket debe ser Public)
+    # URL pública (el bucket debe ser "Public")
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
 
 def guardar_supabase(data: dict) -> None:
@@ -132,7 +124,7 @@ def _make_pdf(datos: dict) -> str:
     Rellena la plantilla 'cdmxdigital2025ppp.pdf' con coords fijas y genera QR.
     Devuelve ruta local del PDF.
     """
-    plantilla = "cdmxdigital2025ppp.pdf"
+    plantilla = os.path.join(os.path.dirname(__file__), "cdmxdigital2025ppp.pdf")
     if not os.path.exists(plantilla):
         raise FileNotFoundError(f"No se encontró la plantilla: {plantilla}")
 
@@ -245,13 +237,15 @@ async def form_motor(m: types.Message, state: FSMContext):
     await m.answer("Nombre del solicitante:")
     await PermisoForm.nombre.set()
 
-import asyncio
-
 @dp.message_handler(state=PermisoForm.nombre, content_types=types.ContentTypes.TEXT)
 async def form_nombre(m: types.Message, state: FSMContext):
     datos = await state.get_data()
     datos["nombre"] = m.text.strip()
-    datos["folio"]  = generar_folio_automatico("05")
+    datos["folio"]  = nuevo_folio("05")  # folio único
+
+    # Fechas para la BD (evita NOT NULL)
+    fecha_exp = datetime.now().date()
+    fecha_ven = (datetime.now() + timedelta(days=30)).date()
 
     await m.answer("⏳ Generando tu PDF, dame unos segundos...")
 
@@ -263,7 +257,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
         nombre_pdf = _slug_filename(f"{datos['folio']}_cdmx_{int(time.time())}.pdf")
         url_pdf    = await asyncio.to_thread(subir_pdf_supabase, path_pdf, nombre_pdf)
 
-        # 3) Enviar el PDF al usuario (esto sí es async)
+        # 3) Enviar el PDF al usuario
         caption = (
             f"✅ Registro creado\n"
             f"Folio: {datos['folio']}\n"
@@ -273,7 +267,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
         with open(path_pdf, "rb") as f:
             await m.answer_document(f, caption=caption)
 
-        # 4) Guardar en Supabase SIN bloquear (y con campos NOT NULL)
+        # 4) Guardar en Supabase SIN bloquear (con campos NOT NULL)
         payload = {
             "folio": datos["folio"],
             "marca": datos["marca"],
@@ -284,7 +278,9 @@ async def form_nombre(m: types.Message, state: FSMContext):
             "nombre": datos["nombre"],
             "entidad": "CDMX",
             "url_pdf": url_pdf,
-            # evita errores NOT NULL si existen esas columnas:
+            "fecha_expedicion": fecha_exp.isoformat(),
+            "fecha_vencimiento": fecha_ven.isoformat(),
+            # por si existen NOT NULL extras:
             "color": datos.get("color", "N/A"),
             "contribuyente": datos.get("contribuyente", "N/A"),
         }
