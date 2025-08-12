@@ -4,9 +4,9 @@
 # Flujo /permiso: marca → linea → anio → serie → motor → nombre
 # PDF desde plantilla cdmxdigital2025ppp.pdf con QR
 # Archivos en /tmp (evita reload en Render)
-# Folio único con tabla folios_unicos (columna fol, prefijo NOT NULL)
+# Folio único con tabla folios_unicos (columna fol; prefijo NOT NULL)
 # Guarda datos en borradores_registros (columna folio)
-# Supabase con service_role y pequeños reintentos
+# Supabase con service_role y reintentos básicos
 # -------------------------------------------------------------
 
 import os
@@ -35,6 +35,7 @@ from supabase import create_client, Client
 # ---------- LOGGING ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("permiso-bot")
+logger.info("BOOT permiso-bot v2.1")
 
 # ---------- ENV VARS ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -53,6 +54,10 @@ FOLIO_PREFIX = os.getenv("FOLIO_PREFIX", "05")
 OUTPUT_DIR = "/tmp/pdfs"         # evita reload en Render
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 PLANTILLA_PDF = os.path.join(os.path.dirname(__file__), "cdmxdigital2025ppp.pdf")
+if not os.path.exists(PLANTILLA_PDF):
+    raise FileNotFoundError(
+        "No se encontró cdmxdigital2025ppp.pdf junto a app.py"
+    )
 
 # Tablas
 TABLE_FOLIOS = "folios_unicos"           # columnas: id (pk), prefijo NOT NULL, fol (texto), entidad, ...
@@ -113,6 +118,10 @@ async def supabase_update_retry(table: str, match: dict, updates: dict, attempts
     raise last
 
 def nuevo_folio(prefix: str = FOLIO_PREFIX) -> str:
+    """
+    Inserta una fila válida (cumple NOT NULL en 'prefijo') y
+    calcula el folio: prefix + id con 6 dígitos.
+    """
     ins = supabase.table(TABLE_FOLIOS).insert({"prefijo": prefix, "entidad": "CDMX"}).execute()
     nid = int(ins.data[0]["id"])
     folio = f"{prefix}{nid:06d}"
@@ -181,7 +190,11 @@ def _upload_pdf(path_local: str, nombre_pdf: str) -> str:
     nombre_pdf = _slug(nombre_pdf)
     with open(path_local, "rb") as f:
         data = f.read()
-    supabase.storage.from_(BUCKET).upload(nombre_pdf, data, {"contentType": "application/pdf", "upsert": True})
+    supabase.storage.from_(BUCKET).upload(
+        nombre_pdf,
+        data,
+        {"contentType": "application/pdf", "upsert": "true"}  # compat modo string
+    )
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
 
 # ---------- FSM ----------
@@ -204,101 +217,142 @@ async def permiso_init(m: types.Message, state: FSMContext):
     await m.answer("Marca del vehículo:")
     await PermisoForm.marca.set()
 
-@dp.message_handler(state=PermisoForm.marca)
+@dp.message_handler(state=PermisoForm.marca, content_types=types.ContentTypes.TEXT)
 async def form_marca(m: types.Message, state: FSMContext):
-    await state.update_data(marca=m.text.strip())
-    await m.answer("Línea:")
+    await state.update_data(marca=(m.text or "").strip())
+    await m.answer("Línea (modelo/versión):")
     await PermisoForm.linea.set()
 
-@dp.message_handler(state=PermisoForm.linea)
+@dp.message_handler(state=PermisoForm.linea, content_types=types.ContentTypes.TEXT)
 async def form_linea(m: types.Message, state: FSMContext):
-    await state.update_data(linea=m.text.strip())
-    await m.answer("Año:")
+    await state.update_data(linea=(m.text or "").strip())
+    await m.answer("Año (4 dígitos):")
     await PermisoForm.anio.set()
 
-@dp.message_handler(state=PermisoForm.anio)
+@dp.message_handler(state=PermisoForm.anio, content_types=types.ContentTypes.TEXT)
 async def form_anio(m: types.Message, state: FSMContext):
-    await state.update_data(anio=m.text.strip())
-    await m.answer("Serie:")
+    await state.update_data(anio=(m.text or "").strip())
+    await m.answer("Serie (VIN):")
     await PermisoForm.serie.set()
 
-@dp.message_handler(state=PermisoForm.serie)
+@dp.message_handler(state=PermisoForm.serie, content_types=types.ContentTypes.TEXT)
 async def form_serie(m: types.Message, state: FSMContext):
-    await state.update_data(serie=m.text.strip())
+    await state.update_data(serie=(m.text or "").strip())
     await m.answer("Motor:")
     await PermisoForm.motor.set()
 
-@dp.message_handler(state=PermisoForm.motor)
+@dp.message_handler(state=PermisoForm.motor, content_types=types.ContentTypes.TEXT)
 async def form_motor(m: types.Message, state: FSMContext):
-    await state.update_data(motor=m.text.strip())
+    await state.update_data(motor=(m.text or "").strip())
     await m.answer("Nombre del solicitante:")
     await PermisoForm.nombre.set()
 
-@dp.message_handler(state=PermisoForm.nombre)
+@dp.message_handler(state=PermisoForm.nombre, content_types=types.ContentTypes.TEXT)
 async def form_nombre(m: types.Message, state: FSMContext):
     datos = await state.get_data()
-    datos["nombre"] = m.text.strip()
+    datos["nombre"] = (m.text or "").strip()
 
+    # 1) Folio único (cumple NOT NULL en 'prefijo')
     folio = nuevo_folio(FOLIO_PREFIX)
     datos["folio"] = folio
+
+    # 2) Fechas
     fecha_exp = datetime.now().date()
     fecha_ven = fecha_exp + timedelta(days=30)
 
-    await m.answer("⏳ Generando PDF…")
+    await m.answer("⏳ Generando tu PDF…")
 
     try:
+        # 3) PDF en /tmp
         path_pdf = await asyncio.to_thread(_make_pdf, datos)
+
+        # 4) Subir a Storage
         nombre_pdf = _slug(f"{folio}_cdmx_{int(time.time())}.pdf")
         url_pdf = await asyncio.to_thread(_upload_pdf, path_pdf, nombre_pdf)
 
+        # 5) Enviar PDF
         with open(path_pdf, "rb") as f:
-            await m.answer_document(f, caption=f"Folio: {folio}\nPDF: {url_pdf}")
+            await m.answer_document(
+                f,
+                caption=f"✅ Registro generado\nFolio: {folio}\n{datos['marca']} {datos['linea']} ({datos['anio']})\nPDF: {url_pdf}"
+            )
 
+        # 6) Guardar en borradores_registros
         await supabase_insert_retry(TABLE_REGISTROS, {
             "folio": folio,
-            "marca": datos["marca"],
-            "linea": datos["linea"],
-            "anio": str(datos["anio"]),
-            "numero_serie": datos["serie"],
-            "numero_motor": datos["motor"],
-            "nombre": datos["nombre"],
+            "marca": datos.get("marca", ""),
+            "linea": datos.get("linea", ""),
+            "anio": str(datos.get("anio", "")),
+            "numero_serie": datos.get("serie", ""),
+            "numero_motor": datos.get("motor", ""),
+            "nombre": datos.get("nombre", ""),
             "entidad": "CDMX",
             "url_pdf": url_pdf,
             "fecha_expedicion": fecha_exp.isoformat(),
             "fecha_vencimiento": fecha_ven.isoformat(),
         })
 
-        await supabase_update_retry(TABLE_FOLIOS, {"fol": folio}, {
-            "url_pdf": url_pdf,
-            "fecha_expedicion": fecha_exp.isoformat(),
-            "fecha_vencimiento": fecha_ven.isoformat(),
-        })
+        # 7) Actualizar fila de folios_unicos con url y fechas (opcional)
+        try:
+            await supabase_update_retry(
+                TABLE_FOLIOS,
+                {"fol": folio},
+                {
+                    "url_pdf": url_pdf,
+                    "fecha_expedicion": fecha_exp.isoformat(),
+                    "fecha_vencimiento": fecha_ven.isoformat(),
+                },
+            )
+        except Exception as e:
+            logger.warning(f"No se pudo actualizar {TABLE_FOLIOS}: {e}")
 
     except Exception as e:
-        logger.exception("Error generando PDF")
-        await m.answer(f"❌ Error: {e}")
+        logger.exception("Fallo generando/enviando PDF")
+        await m.answer(f"❌ Error generando PDF: {e}")
 
     await state.finish()
+
+# Fallback
+@dp.message_handler()
+async def fallback(m: types.Message):
+    await m.answer("No entendí. Usa /permiso para iniciar.")
 
 # ---------- FASTAPI ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if BASE_URL:
-        await bot.set_webhook(f"{BASE_URL}/webhook")
+    logger.info("Iniciando webhook…")
+    try:
+        if BASE_URL:
+            await bot.set_webhook(f"{BASE_URL}/webhook")
+            logger.info(f"Webhook OK: {BASE_URL}/webhook")
+        else:
+            logger.warning("BASE_URL no configurada; sin webhook.")
+    except Exception as e:
+        logger.warning(f"No se pudo setear webhook: {e}")
     yield
-    await bot.delete_webhook()
+    try:
+        await bot.delete_webhook()
+    except Exception:
+        pass
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="Bot Permisos Digitales", lifespan=lifespan)
 
 @app.get("/")
 def health():
-    return {"ok": True}
+    return {"ok": True, "webhook": f"{BASE_URL}/webhook" if BASE_URL else None}
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    data = await request.json()
+    # Procesa la actualización de Telegram
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": True, "note": "bad_json"}
+
+    # Aiogram v2 requiere setear el contexto actual
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
+
     update = types.Update(**data)
     await dp.process_update(update)
     return {"ok": True}
