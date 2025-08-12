@@ -5,7 +5,7 @@
 # Genera PDF desde plantilla "cdmxdigital2025ppp.pdf" (junto a app.py)
 # Guarda folio único en "folios_unicos" y registro en "borradores_registros"
 # Sube el PDF a Storage (bucket "pdfs").
-# Env: BOT_TOKEN, BASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY
+# Env: BOT_TOKEN, BASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, [FLOW_TTL]
 # Start cmd: uvicorn app:app --host 0.0.0.0 --port 10000
 # -------------------------------------------------------------
 
@@ -57,6 +57,40 @@ if not SUPABASE_SERVICE_KEY:
 BUCKET = os.getenv("BUCKET", "pdfs").strip()
 FOLIO_PREFIX = os.getenv("FOLIO_PREFIX", "05").strip()
 
+# == Anti–SPAM / Lock por chat ==
+FLOW_TTL = int(os.getenv("FLOW_TTL", "300"))  # 5 min default
+ACTIVE = {}  # chat_id -> deadline (epoch seg)
+
+def _now(): return time.time()
+
+def lock_busy(chat_id: int) -> bool:
+    dl = ACTIVE.get(chat_id)
+    return bool(dl and dl > _now())
+
+def lock_acquire(chat_id: int) -> bool:
+    if lock_busy(chat_id):
+        return False
+    ACTIVE[chat_id] = _now() + FLOW_TTL
+    return True
+
+def lock_bump(chat_id: int):
+    if chat_id in ACTIVE:
+        ACTIVE[chat_id] = _now() + FLOW_TTL
+
+def lock_release(chat_id: int):
+    ACTIVE.pop(chat_id, None)
+
+async def _sweeper():
+    while True:
+        try:
+            now = _now()
+            dead = [cid for cid, dl in ACTIVE.items() if dl <= now]
+            for cid in dead:
+                ACTIVE.pop(cid, None)
+        except Exception as e:
+            log.warning(f"sweeper: {e}")
+        await asyncio.sleep(30)
+
 # rutas/archivos
 OUTPUT_DIR = "/tmp/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -100,8 +134,8 @@ async def supabase_insert_retry(table: str, row: dict, attempts: int = 4, delay:
     last = None
     for i in range(attempts):
         try:
-            res = supabase.table(table).insert(row).execute()
-            return res.data
+            # llamadas sync -> no bloqueemos el loop si están pesadas
+            return await asyncio.to_thread(lambda: supabase.table(table).insert(row).execute().data)
         except Exception as e:
             last = e
             log.warning(f"[Supabase insert retry {i+1}/{attempts}] {e}")
@@ -112,8 +146,9 @@ async def supabase_update_retry(table: str, match: dict, updates: dict, attempts
     last = None
     for i in range(attempts):
         try:
-            res = supabase.table(table).update(updates).match(match).execute()
-            return res.data
+            return await asyncio.to_thread(
+                lambda: supabase.table(table).update(updates).match(match).execute().data
+            )
         except Exception as e:
             last = e
             log.warning(f"[Supabase update retry {i+1}/{attempts}] {e}")
@@ -213,11 +248,21 @@ class PermisoForm(StatesGroup):
 @dp.message_handler(Command("start"))
 async def cmd_start(m: types.Message):
     log.info(f"/start <- chat:{m.chat.id}")
-    await m.answer("👋 Bot listo.\nUsa /permiso para iniciar el registro.")
+    await m.answer("👋 Bot listo.\nUsa /permiso para iniciar el registro.\n\nEscribe /cancel para abortar un flujo.")
+
+@dp.message_handler(commands=["cancel", "stop"])
+async def cmd_cancel(m: types.Message, state: FSMContext):
+    await state.finish()
+    lock_release(m.chat.id)
+    await m.answer("❎ Flujo cancelado. Usa /permiso para iniciar de nuevo.")
 
 @dp.message_handler(Command("permiso"))
 async def permiso_init(m: types.Message, state: FSMContext):
     log.info(f"/permiso <- chat:{m.chat.id}")
+    # Candado por chat
+    if not lock_acquire(m.chat.id):
+        await m.answer("⚠️ Ya tienes un registro en curso. Termina o manda /cancel.")
+        return
     await state.finish()
     await m.answer("Marca del vehículo:")
     await PermisoForm.marca.set()
@@ -225,6 +270,7 @@ async def permiso_init(m: types.Message, state: FSMContext):
 @dp.message_handler(state=PermisoForm.marca, content_types=types.ContentTypes.TEXT)
 async def form_marca(m: types.Message, state: FSMContext):
     log.info(f"marca <- chat:{m.chat.id} texto:{m.text}")
+    lock_bump(m.chat.id)
     await state.update_data(marca=(m.text or "").strip())
     await m.answer("Línea (modelo/versión):")
     await PermisoForm.linea.set()
@@ -232,6 +278,7 @@ async def form_marca(m: types.Message, state: FSMContext):
 @dp.message_handler(state=PermisoForm.linea, content_types=types.ContentTypes.TEXT)
 async def form_linea(m: types.Message, state: FSMContext):
     log.info(f"linea <- chat:{m.chat.id} texto:{m.text}")
+    lock_bump(m.chat.id)
     await state.update_data(linea=(m.text or "").strip())
     await m.answer("Año (4 dígitos):")
     await PermisoForm.anio.set()
@@ -239,6 +286,7 @@ async def form_linea(m: types.Message, state: FSMContext):
 @dp.message_handler(state=PermisoForm.anio, content_types=types.ContentTypes.TEXT)
 async def form_anio(m: types.Message, state: FSMContext):
     log.info(f"anio <- chat:{m.chat.id} texto:{m.text}")
+    lock_bump(m.chat.id)
     await state.update_data(anio=(m.text or "").strip())
     await m.answer("Serie (VIN):")
     await PermisoForm.serie.set()
@@ -246,6 +294,7 @@ async def form_anio(m: types.Message, state: FSMContext):
 @dp.message_handler(state=PermisoForm.serie, content_types=types.ContentTypes.TEXT)
 async def form_serie(m: types.Message, state: FSMContext):
     log.info(f"serie <- chat:{m.chat.id} texto:{m.text}")
+    lock_bump(m.chat.id)
     await state.update_data(serie=(m.text or "").strip())
     await m.answer("Motor:")
     await PermisoForm.motor.set()
@@ -253,6 +302,7 @@ async def form_serie(m: types.Message, state: FSMContext):
 @dp.message_handler(state=PermisoForm.motor, content_types=types.ContentTypes.TEXT)
 async def form_motor(m: types.Message, state: FSMContext):
     log.info(f"motor <- chat:{m.chat.id} texto:{m.text}")
+    lock_bump(m.chat.id)
     await state.update_data(motor=(m.text or "").strip())
     await m.answer("Nombre del solicitante:")
     await PermisoForm.nombre.set()
@@ -260,11 +310,12 @@ async def form_motor(m: types.Message, state: FSMContext):
 @dp.message_handler(state=PermisoForm.nombre, content_types=types.ContentTypes.TEXT)
 async def form_nombre(m: types.Message, state: FSMContext):
     log.info(f"nombre <- chat:{m.chat.id} texto:{m.text}")
+    lock_bump(m.chat.id)
     datos = await state.get_data()
     datos["nombre"] = (m.text or "").strip()
 
     # 1) Folio único
-    folio = nuevo_folio(FOLIO_PREFIX)
+    folio = await asyncio.to_thread(nuevo_folio, FOLIO_PREFIX)
     datos["folio"] = folio
 
     # 2) Fechas
@@ -326,16 +377,20 @@ async def form_nombre(m: types.Message, state: FSMContext):
         except Exception as e:
             log.warning(f"No se pudo actualizar {TABLE_FOLIOS}: {e}")
 
+        await m.answer("🎉 Listo. Si quieres otro, manda /permiso.")
+
     except Exception as e:
         log.exception("Fallo generando/enviando PDF")
         await m.answer(f"❌ Error generando PDF: {e}")
 
+    # cierre limpio
     await state.finish()
+    lock_release(m.chat.id)
 
 # fallback
 @dp.message_handler()
 async def fallback(m: types.Message):
-    await m.answer("No entendí. Usa /permiso para iniciar.")
+    await m.answer("No entendí. Usa /permiso para iniciar o /cancel para abortar.")
 
 # Keep-alive para que Render no mate el servicio
 async def keep_alive():
@@ -367,6 +422,7 @@ async def lifespan(app: FastAPI):
         else:
             log.warning("BASE_URL no configurada; sin webhook.")
         asyncio.create_task(keep_alive())
+        asyncio.create_task(_sweeper())
     except Exception as e:
         log.warning(f"No se pudo setear webhook: {e}")
     yield
@@ -393,6 +449,7 @@ async def debug():
         "bot": {"id": me.id, "username": me.username},
         "webhook": info.url,
         "pending": info.pending_update_count,
+        "active_locks": len(ACTIVE),
     }
 
 @app.post("/webhook")
