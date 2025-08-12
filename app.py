@@ -5,7 +5,8 @@
 # Genera PDF desde plantilla "cdmxdigital2025ppp.pdf" (junto a app.py)
 # Guarda folio único en "folios_unicos" y registro en "borradores_registros"
 # Sube el PDF a Storage (bucket "pdfs").
-# Variables requeridas: BOT_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY, BASE_URL
+# Env: BOT_TOKEN, BASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY
+# Start cmd (Render): uvicorn app:app --host 0.0.0.0 --port 10000
 # -------------------------------------------------------------
 
 import os
@@ -33,7 +34,10 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from supabase import create_client, Client
 
 # ---------- LOGGING ----------
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 log = logging.getLogger("permiso-bot")
 log.info("BOOT permiso-bot ⚙️")
 
@@ -69,7 +73,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ---------- BOT ----------
 storage = MemoryStorage()
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot, storage=storage)
 
 # ---------- COORDENADAS (PDF) ----------
@@ -108,7 +112,7 @@ async def supabase_update_retry(table: str, match: dict, updates: dict, attempts
     last = None
     for i in range(attempts):
         try:
-            # SDK nuevo: update(...).match({...}).execute()
+            # SDK v2: update(...).match({...}).execute()
             res = supabase.table(table).update(updates).match(match).execute()
             return res.data
         except Exception as e:
@@ -118,15 +122,11 @@ async def supabase_update_retry(table: str, match: dict, updates: dict, attempts
     raise last
 
 def nuevo_folio(prefix: str = FOLIO_PREFIX) -> str:
-    """
-    Inserta fila cumpliendo NOT NULL 'prefijo' y arma:
-    folio = prefix + id (6 dígitos), p.ej. 05000001
-    """
+    """Inserta fila y arma folio = prefix + id (6 dígitos), p.ej. 05000001."""
     ins = supabase.table(TABLE_FOLIOS).insert({"prefijo": prefix, "entidad": "CDMX"}).execute()
     nid = int(ins.data[0]["id"])
     folio = f"{prefix}{nid:06d}"
     try:
-        # SDK nuevo: .match({"id": nid})
         supabase.table(TABLE_FOLIOS).update({"fol": folio}).match({"id": nid}).execute()
     except Exception as e:
         log.warning(f"No pude actualizar 'fol' en {TABLE_FOLIOS}: {e}")
@@ -177,6 +177,7 @@ def _make_pdf(datos: dict) -> str:
     qr_png = os.path.join(OUTPUT_DIR, f"{_slug(datos['folio'])}_qr.png")
     img.save(qr_png)
 
+    # QR centrado abajo
     tam_qr = 1.6 * 28.35
     ancho_pagina = pg.rect.width
     x0 = (ancho_pagina / 2) - (tam_qr / 2) - 19
@@ -333,10 +334,10 @@ async def keep_alive():
     while True:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{BASE_URL}/", timeout=10) as resp:
+                async with session.get(f"{BASE_URL}/", timeout=10):
                     pass
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"keep_alive: {e}")
         await asyncio.sleep(600)  # cada 10 minutos
 
 # ---------- FASTAPI ----------
@@ -344,13 +345,14 @@ async def keep_alive():
 async def lifespan(app: FastAPI):
     log.info("Iniciando webhook…")
     try:
+        # limpia backlog y fija webhook
+        await bot.delete_webhook(drop_pending_updates=True)
         if BASE_URL:
-            # Evita backlog y deja el webhook limpio
             await bot.set_webhook(f"{BASE_URL}/webhook", drop_pending_updates=True)
-            log.info(f"Webhook OK: {BASE_URL}/webhook")
+            info = await bot.get_webhook_info()
+            log.info(f"Webhook OK: {info.url} | pending={info.pending_update_count}")
         else:
             log.warning("BASE_URL no configurada; sin webhook.")
-        # Iniciar keep-alive en background
         asyncio.create_task(keep_alive())
     except Exception as e:
         log.warning(f"No se pudo setear webhook: {e}")
@@ -363,19 +365,43 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Bot Permisos Digitales", lifespan=lifespan)
 
 @app.get("/")
-def health():
-    return {"ok": True, "webhook": f"{BASE_URL}/webhook" if BASE_URL else None}
+async def health():
+    try:
+        info = await bot.get_webhook_info()
+        return {"ok": True, "webhook": info.url, "pending": info.pending_update_count}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.get("/debug")
+async def debug():
+    """Para revisar rápido desde Render."""
+    me = await bot.get_me()
+    info = await bot.get_webhook_info()
+    return {
+        "bot": {"id": me.id, "username": me.username},
+        "webhook": info.url,
+        "pending": info.pending_update_count,
+    }
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    # Responder rápido y procesar en background
     try:
         data = await request.json()
     except Exception:
         return {"ok": True, "note": "bad_json"}
 
+    # Requerido por aiogram v2
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
+
+    # Log mínimo para saber que sí llega algo
+    try:
+        msg = data.get("message") or data.get("edited_message") or {}
+        frm = (msg.get("from") or {}).get("id")
+        txt = msg.get("text")
+        log.info(f"POST /webhook <- chat:{frm} text:{txt}")
+    except Exception:
+        pass
 
     async def _proc():
         try:
