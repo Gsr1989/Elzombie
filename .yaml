@@ -8,18 +8,16 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
 
-    # FastAPI responde en "/"
     healthCheckPath: /
     healthCheckTimeoutSeconds: 120
 
-    # Variables de entorno necesarias por app.py
     envVars:
       - key: BOT_TOKEN
         value: 8416888394:AAEG4x2966BAKqu4OsXpUzLvutuljZSTcWk
       - key: SUPABASE_URL
         value: https://xsagwqepoljfsogusubw.supabase.co
       - key: SUPABASE_SERVICE_KEY
-        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzYWd3cWVwb2xqZnNvZ3VzdWJ3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0Mzk2Mzc1NSwiZXhwIjoyMDU5NTM5NzU1fQ.aaTWr2E_l20TlWjdZgKp3ddd3bmtnL22jZisvT_aN0w
+        sync: false        # márcala como Secret en Render y pega TU service_role
       - key: BUCKET
         value: pdfs
       - key: FOLIO_PREFIX
