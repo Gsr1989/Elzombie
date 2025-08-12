@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 
 import fitz               # PyMuPDF
 import qrcode
+import aiohttp
 from fastapi import FastAPI, Request
 
 # Aiogram v2
@@ -194,11 +195,17 @@ def _upload_pdf(path_local: str, nombre_pdf: str) -> str:
     with open(path_local, "rb") as f:
         data = f.read()
 
+    # Elimina si ya existe
+    try:
+        supabase.storage.from_(BUCKET).remove([nombre_pdf])
+    except:
+        pass
+
+    # Sube el archivo
     supabase.storage.from_(BUCKET).upload(
         nombre_pdf,                            # p.ej. "05000060_cdmx_1754971017.pdf"
         data,
-        file_options={"content_type": "application/pdf"},
-        upsert=True
+        file_options={"content-type": "application/pdf"}
     )
 
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
@@ -328,6 +335,17 @@ async def form_nombre(m: types.Message, state: FSMContext):
 async def fallback(m: types.Message):
     await m.answer("No entendí. Usa /permiso para iniciar.")
 
+# Keep-alive para que Render no mate el servicio
+async def keep_alive():
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{BASE_URL}/") as resp:
+                    pass
+        except:
+            pass
+        await asyncio.sleep(600)  # cada 10 minutos
+
 # ---------- FASTAPI ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -338,6 +356,11 @@ async def lifespan(app: FastAPI):
             log.info(f"Webhook OK: {BASE_URL}/webhook")
         else:
             log.warning("BASE_URL no configurada; sin webhook.")
+        
+        # Iniciar keep-alive
+        if BASE_URL:
+            asyncio.create_task(keep_alive())
+            
     except Exception as e:
         log.warning(f"No se pudo setear webhook: {e}")
     yield
@@ -366,23 +389,3 @@ async def telegram_webhook(request: Request):
     update = types.Update(**data)
     await dp.process_update(update)
     return {"ok": True}
-
-import asyncio
-import aiohttp
-
-# Keep-alive para que Render no mate el servicio
-async def keep_alive():
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{BASE_URL}/") as resp:
-                    pass
-        except:
-            pass
-        await asyncio.sleep(600)  # cada 10 minutos
-
-# Iniciar keep-alive al arrancar
-@app.on_event("startup")
-async def startup():
-    if BASE_URL:
-        asyncio.create_task(keep_alive())
