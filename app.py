@@ -190,18 +190,19 @@ def _make_pdf(datos: dict) -> str:
     return out_path
 
 def _upload_pdf(path_local: str, nombre_pdf: str) -> str:
-    nombre_pdf = _slug(nombre_pdf).lstrip("/")        # SIN espacios y sin slash inicial
+    nombre_pdf = _slug(nombre_pdf).lstrip("/")   # <- sin slash inicial
     with open(path_local, "rb") as f:
         data = f.read()
-    # Algunas versiones requieren header 'x-upsert' como string "true"
-    supabase.storage.from_(BUCKET).upload(
-        nombre_pdf,
-        data,
-        file_options={"contentType": "application/pdf"},
-        headers={"x-upsert": "true"}
-    )
-    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
 
+    supabase.storage.from_(BUCKET).upload(
+        nombre_pdf,                            # p.ej. "05000060_cdmx_1754971017.pdf"
+        data,
+        file_options={"content_type": "application/pdf"},
+        upsert=True
+    )
+
+    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
+    
 # ---------- FSM ----------
 class PermisoForm(StatesGroup):
     marca = State()
