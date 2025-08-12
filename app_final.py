@@ -2,11 +2,11 @@
 # -------------------------------------------------------------
 # Aiogram v2 (FSM) + FastAPI webhook (Render)
 # Flujo /permiso: marca → linea → anio → serie → motor → nombre
-# Genera PDF desde "cdmxdigital2025ppp.pdf" (junto a app_final.py)
+# Genera PDF desde "cdmxdigital2025ppp.pdf" (junto a app.py)
 # Folio único en "folios_unicos" y registro en "borradores_registros"
 # Sube PDF a Supabase Storage (bucket "pdfs")
 # Env: BOT_TOKEN, BASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, [FLOW_TTL]
-# Start (Render): uvicorn app_final:app --host 0.0.0.0 --port $PORT
+# Start (Render): uvicorn app:app --host 0.0.0.0 --port $PORT
 # -------------------------------------------------------------
 
 import os
@@ -39,7 +39,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 log = logging.getLogger("permiso-bot")
-log.info("🚀 BOOT permiso-bot WEBHOOK VERSION")
+log.info("BOOT permiso-bot")
 
 # ---------- ENV ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -81,17 +81,14 @@ def lock_release(chat_id: int):
     ACTIVE.pop(chat_id, None)
 
 async def _sweeper():
-    """Limpia locks expirados cada 30 segundos"""
     while True:
         try:
             now = _now()
             dead = [cid for cid, dl in ACTIVE.items() if dl <= now]
             for cid in dead:
                 ACTIVE.pop(cid, None)
-            if dead:
-                log.info(f"Limpiados {len(dead)} locks expirados")
         except Exception as e:
-            log.warning(f"sweeper error: {e}")
+            log.warning(f"sweeper: {e}")
         await asyncio.sleep(30)
 
 # Rutas/archivos
@@ -99,7 +96,7 @@ OUTPUT_DIR = "/tmp/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 PLANTILLA_PDF = os.path.join(os.path.dirname(__file__), "cdmxdigital2025ppp.pdf")
 if not os.path.exists(PLANTILLA_PDF):
-    raise FileNotFoundError("No se encontró cdmxdigital2025ppp.pdf junto a app_final.py")
+    raise FileNotFoundError("No se encontró cdmxdigital2025ppp.pdf junto a app.py")
 
 # Tablas
 TABLE_FOLIOS = "folios_unicos"
@@ -253,12 +250,7 @@ async def cmd_start(m: types.Message, state: FSMContext):
     # Limpiar cualquier estado activo
     await state.finish()
     lock_release(m.chat.id)
-    await m.answer(
-        "🎯 <b>Bot de Permisos Digitales CDMX</b>\n\n"
-        "📋 Usa /permiso para iniciar el registro\n"
-        "❌ Usa /cancel para abortar un flujo\n\n"
-        "🚗 Genera permisos con QR y PDF automáticamente"
-    )
+    await m.answer("👋 Bot listo.\nUsa /permiso para iniciar el registro.\n\nEscribe /cancel para abortar un flujo.")
 
 @dp.message_handler(commands=["cancel", "stop"], state="*")
 async def cmd_cancel(m: types.Message, state: FSMContext):
@@ -291,7 +283,7 @@ async def permiso_init(m: types.Message, state: FSMContext):
         return
     
     log.info(f"chat:{m.chat.id} iniciando flujo /permiso")
-    await m.answer("📋 <b>Iniciando registro de permiso</b>\n\n🚗 Marca del vehículo:")
+    await m.answer("📋 Iniciando registro de permiso.\n\n🚗 Marca del vehículo:")
     await PermisoForm.marca.set()
 
 @dp.message_handler(state=PermisoForm.marca, content_types=types.ContentTypes.TEXT)
@@ -396,8 +388,8 @@ async def form_nombre(m: types.Message, state: FSMContext):
 
         # 5) Enviar PDF al chat (fallback a texto)
         caption = (
-            f"✅ <b>Registro generado exitosamente</b>\n\n"
-            f"📋 Folio: <code>{folio}</code>\n"
+            f"✅ Registro generado exitosamente\n\n"
+            f"📋 Folio: <b>{folio}</b>\n"
             f"🚗 Vehículo: {datos.get('marca','')} {datos.get('linea','')} ({datos.get('anio','')})\n"
             f"👤 Solicitante: {datos.get('nombre','')}\n\n"
             f"🔗 URL: {url_pdf}"
@@ -443,7 +435,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
         except Exception as e:
             log.warning(f"No se pudo actualizar {TABLE_FOLIOS}: {e}")
 
-        await m.answer("🎉 <b>¡Permiso generado exitosamente!</b>\n\nSi necesitas otro permiso, puedes mandar /permiso nuevamente.")
+        await m.answer("🎉 ¡Permiso generado exitosamente!\n\nSi necesitas otro permiso, puedes mandar /permiso nuevamente.")
         log.info(f"Proceso completado exitosamente para chat:{m.chat.id} folio:{folio}")
 
     except Exception as e:
@@ -480,7 +472,7 @@ async def keep_alive():
 # ---------- FASTAPI ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("🚀 Iniciando webhook…")
+    log.info("Iniciando webhook…")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         if BASE_URL:
