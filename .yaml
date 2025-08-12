@@ -3,15 +3,7 @@ services:
     name: bot-permisos
     env: python
     plan: pro
-    autoDeploy: false
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --workers 2
     healthCheckPath: /
-
-  - type: worker
-    name: bot-permisos-worker
-    env: python
-    plan: pro
     autoDeploy: false
-    buildCommand: pip install -r requirements.txt
-    startCommand: python worker.py
