@@ -2,11 +2,11 @@
 # -------------------------------------------------------------
 # Aiogram v2 (FSM) + FastAPI webhook (Render)
 # Flujo /permiso: marca → linea → anio → serie → motor → nombre
-# Genera PDF desde plantilla "cdmxdigital2025ppp.pdf" (junto a app.py)
-# Guarda folio único en "folios_unicos" y registro en "borradores_registros"
-# Sube el PDF a Storage (bucket "pdfs").
+# Genera PDF desde "cdmxdigital2025ppp.pdf" (junto a app.py)
+# Folio único en "folios_unicos" y registro en "borradores_registros"
+# Sube PDF a Supabase Storage (bucket "pdfs")
 # Env: BOT_TOKEN, BASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, [FLOW_TTL]
-# Start cmd: uvicorn app:app --host 0.0.0.0 --port 10000
+# Start (Render): uvicorn app:app --host 0.0.0.0 --port $PORT
 # -------------------------------------------------------------
 
 import os
@@ -39,7 +39,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 log = logging.getLogger("permiso-bot")
-log.info("BOOT permiso-bot ⚙️")
+log.info("BOOT permiso-bot")
 
 # ---------- ENV ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -91,18 +91,18 @@ async def _sweeper():
             log.warning(f"sweeper: {e}")
         await asyncio.sleep(30)
 
-# rutas/archivos
+# Rutas/archivos
 OUTPUT_DIR = "/tmp/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 PLANTILLA_PDF = os.path.join(os.path.dirname(__file__), "cdmxdigital2025ppp.pdf")
 if not os.path.exists(PLANTILLA_PDF):
     raise FileNotFoundError("No se encontró cdmxdigital2025ppp.pdf junto a app.py")
 
-# tablas
+# Tablas
 TABLE_FOLIOS = "folios_unicos"
 TABLE_REGISTROS = "borradores_registros"
 
-# Cliente Supabase con service_role (bypass RLS)
+# Cliente Supabase service_role (bypass RLS)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ---------- BOT ----------
@@ -134,7 +134,6 @@ async def supabase_insert_retry(table: str, row: dict, attempts: int = 4, delay:
     last = None
     for i in range(attempts):
         try:
-            # llamadas sync -> no bloqueemos el loop si están pesadas
             return await asyncio.to_thread(lambda: supabase.table(table).insert(row).execute().data)
         except Exception as e:
             last = e
@@ -259,7 +258,6 @@ async def cmd_cancel(m: types.Message, state: FSMContext):
 @dp.message_handler(Command("permiso"))
 async def permiso_init(m: types.Message, state: FSMContext):
     log.info(f"/permiso <- chat:{m.chat.id}")
-    # Candado por chat
     if not lock_acquire(m.chat.id):
         await m.answer("⚠️ Ya tienes un registro en curso. Termina o manda /cancel.")
         return
@@ -314,7 +312,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
     datos = await state.get_data()
     datos["nombre"] = (m.text or "").strip()
 
-    # 1) Folio único
+    # 1) Folio único (en thread)
     folio = await asyncio.to_thread(nuevo_folio, FOLIO_PREFIX)
     datos["folio"] = folio
 
@@ -332,7 +330,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
         nombre_pdf = f"{_slug(folio)}_cdmx_{int(time.time())}.pdf"
         url_pdf = await asyncio.to_thread(_upload_pdf, path_pdf, nombre_pdf)
 
-        # 5) Enviar PDF al chat (con fallback a texto)
+        # 5) Enviar PDF al chat (fallback a texto)
         caption = (
             f"✅ Registro generado\n"
             f"Folio: {folio}\n"
@@ -345,7 +343,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
                 await m.answer_document(f, caption=caption)
             log.info(f"sendDocument OK chat:{m.chat.id} folio:{folio}")
         except Exception as e_doc:
-            log.warning(f"sendDocument falló: {e_doc}. Mando link por texto…")
+            log.warning(f"sendDocument falló: {e_doc}. Envío texto.")
             await m.answer(caption)
 
         # 6) Guardar registro
@@ -383,16 +381,15 @@ async def form_nombre(m: types.Message, state: FSMContext):
         log.exception("Fallo generando/enviando PDF")
         await m.answer(f"❌ Error generando PDF: {e}")
 
-    # cierre limpio
     await state.finish()
     lock_release(m.chat.id)
 
-# fallback
+# Fallback
 @dp.message_handler()
 async def fallback(m: types.Message):
     await m.answer("No entendí. Usa /permiso para iniciar o /cancel para abortar.")
 
-# Keep-alive para que Render no mate el servicio
+# Keep-alive para Render
 async def keep_alive():
     if not BASE_URL:
         return
@@ -403,7 +400,7 @@ async def keep_alive():
                     pass
         except Exception as e:
             log.warning(f"keep_alive: {e}")
-        await asyncio.sleep(600)  # cada 10 minutos
+        await asyncio.sleep(600)
 
 # ---------- FASTAPI ----------
 @asynccontextmanager
@@ -462,6 +459,7 @@ async def telegram_webhook(request: Request):
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
 
+    # Log mínimo
     try:
         msg = data.get("message") or data.get("edited_message") or {}
         frm = (msg.get("from") or {}).get("id")
