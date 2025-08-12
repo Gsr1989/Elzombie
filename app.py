@@ -1,13 +1,12 @@
 # app.py
 # -------------------------------------------------------------
 # Aiogram v2 (FSM) + FastAPI webhook
-# - Flujo /permiso: marca → linea → anio → serie → motor → nombre
-# - PDF desde plantilla cdmxdigital2025ppp.pdf con QR
-# - Archivos en /tmp (evita reload)
-# - Folio único con tabla folios_unicos (columna fol)
-# - Guarda datos en borradores_registros (columna folio)
-# - Supabase con service_role y reintentos básicos
-# - Webhook non-blocking + drop_pending_updates
+# Flujo /permiso: marca → linea → anio → serie → motor → nombre
+# PDF desde plantilla cdmxdigital2025ppp.pdf con QR
+# Archivos en /tmp (evita reload en Render)
+# Folio único con tabla folios_unicos (columna fol, prefijo NOT NULL)
+# Guarda datos en borradores_registros (columna folio)
+# Supabase con service_role y pequeños reintentos
 # -------------------------------------------------------------
 
 import os
@@ -56,8 +55,8 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 PLANTILLA_PDF = os.path.join(os.path.dirname(__file__), "cdmxdigital2025ppp.pdf")
 
 # Tablas
-TABLE_FOLIOS = "folios_unicos"           # columna clave: fol
-TABLE_REGISTROS = "borradores_registros" # columna clave: folio
+TABLE_FOLIOS = "folios_unicos"           # columnas: id (pk), prefijo NOT NULL, fol (texto), entidad, ...
+TABLE_REGISTROS = "borradores_registros" # columna clave para join: folio
 
 # Cliente Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -67,7 +66,7 @@ storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=storage)
 
-# ---------- COORDENADAS (NO TOCAR) ----------
+# ---------- COORDENADAS ----------
 coords_cdmx = {
     "folio":   (87, 130, 14, (1, 0, 0)),
     "fecha":   (130, 145, 12, (0, 0, 0)),
@@ -114,27 +113,17 @@ async def supabase_update_retry(table: str, match: dict, updates: dict, attempts
     raise last
 
 def nuevo_folio(prefix: str = FOLIO_PREFIX) -> str:
-    """
-    Crea fila vacía en folios_unicos y arma folio único:
-    fol = PREFIX + id (6 dígitos). p.ej. 05000001
-    """
-    ins = supabase.table(TABLE_FOLIOS).insert({}).execute()
+    ins = supabase.table(TABLE_FOLIOS).insert({"prefijo": prefix, "entidad": "CDMX"}).execute()
     nid = int(ins.data[0]["id"])
     folio = f"{prefix}{nid:06d}"
-    # si tu tabla tiene columnas 'fol', 'prefijo' y 'entidad', las actualizamos
     try:
-        supabase.table(TABLE_FOLIOS).update(
-            {"fol": folio, "prefijo": prefix, "entidad": "CDMX"}
-        ).eq("id", nid).execute()
+        supabase.table(TABLE_FOLIOS).update({"fol": folio}).eq("id", nid).execute()
     except Exception as e:
-        logger.warning(f"No pude actualizar folio en {TABLE_FOLIOS}: {e}")
+        logger.warning(f"No pude actualizar 'fol' en {TABLE_FOLIOS}: {e}")
     return folio
 
 # ---------- PDF ----------
 def _make_pdf(datos: dict) -> str:
-    if not os.path.exists(PLANTILLA_PDF):
-        raise FileNotFoundError("No se encontró la plantilla cdmxdigital2025ppp.pdf")
-
     out_path = os.path.join(OUTPUT_DIR, f"{datos['folio']}_cdmx.pdf")
     doc = fitz.open(PLANTILLA_PDF)
     pg = doc[0]
@@ -148,22 +137,16 @@ def _make_pdf(datos: dict) -> str:
     fecha_visual = f"{fecha_exp.day:02d} DE {meses[fecha_exp.month]} DEL {fecha_exp.year}"
     vigencia_visual = fecha_ven.strftime("%d/%m/%Y")
 
-    # Texto
-    pg.insert_text(coords_cdmx["folio"][:2], datos["folio"],
-                   fontsize=coords_cdmx["folio"][2], color=coords_cdmx["folio"][3])
-    pg.insert_text(coords_cdmx["fecha"][:2], fecha_visual,
-                   fontsize=coords_cdmx["fecha"][2], color=coords_cdmx["fecha"][3])
+    pg.insert_text(coords_cdmx["folio"][:2], datos["folio"], fontsize=coords_cdmx["folio"][2], color=coords_cdmx["folio"][3])
+    pg.insert_text(coords_cdmx["fecha"][:2], fecha_visual, fontsize=coords_cdmx["fecha"][2], color=coords_cdmx["fecha"][3])
 
     for key in ["marca", "serie", "linea", "motor", "anio"]:
         x, y, s, col = coords_cdmx[key]
         pg.insert_text((x, y), str(datos[key]), fontsize=s, color=col)
 
-    pg.insert_text(coords_cdmx["vigencia"][:2], vigencia_visual,
-                   fontsize=coords_cdmx["vigencia"][2], color=coords_cdmx["vigencia"][3])
-    pg.insert_text(coords_cdmx["nombre"][:2], datos["nombre"],
-                   fontsize=coords_cdmx["nombre"][2], color=coords_cdmx["nombre"][3])
+    pg.insert_text(coords_cdmx["vigencia"][:2], vigencia_visual, fontsize=coords_cdmx["vigencia"][2], color=coords_cdmx["vigencia"][3])
+    pg.insert_text(coords_cdmx["nombre"][:2], datos["nombre"], fontsize=coords_cdmx["nombre"][2], color=coords_cdmx["nombre"][3])
 
-    # QR
     qr_text = (
         f"Folio: {datos['folio']}\n"
         f"Marca: {datos['marca']}\n"
@@ -182,7 +165,6 @@ def _make_pdf(datos: dict) -> str:
     qr_png = os.path.join(OUTPUT_DIR, f"{datos['folio']}_qr.png")
     img.save(qr_png)
 
-    # QR coordenadas fijas
     tam_qr = 1.6 * 28.35
     ancho_pagina = pg.rect.width
     x0 = (ancho_pagina / 2) - (tam_qr / 2) - 19
@@ -199,7 +181,7 @@ def _upload_pdf(path_local: str, nombre_pdf: str) -> str:
     nombre_pdf = _slug(nombre_pdf)
     with open(path_local, "rb") as f:
         data = f.read()
-    supabase.storage.from_(BUCKET).upload(nombre_pdf, data, {"contentType": "application/pdf"})
+    supabase.storage.from_(BUCKET).upload(nombre_pdf, data, {"contentType": "application/pdf", "upsert": True})
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
 
 # ---------- FSM ----------
@@ -222,71 +204,57 @@ async def permiso_init(m: types.Message, state: FSMContext):
     await m.answer("Marca del vehículo:")
     await PermisoForm.marca.set()
 
-@dp.message_handler(state=PermisoForm.marca, content_types=types.ContentTypes.TEXT)
+@dp.message_handler(state=PermisoForm.marca)
 async def form_marca(m: types.Message, state: FSMContext):
     await state.update_data(marca=m.text.strip())
-    await m.answer("Línea (modelo/versión):")
+    await m.answer("Línea:")
     await PermisoForm.linea.set()
 
-@dp.message_handler(state=PermisoForm.linea, content_types=types.ContentTypes.TEXT)
+@dp.message_handler(state=PermisoForm.linea)
 async def form_linea(m: types.Message, state: FSMContext):
     await state.update_data(linea=m.text.strip())
-    await m.answer("Año (4 dígitos):")
+    await m.answer("Año:")
     await PermisoForm.anio.set()
 
-@dp.message_handler(state=PermisoForm.anio, content_types=types.ContentTypes.TEXT)
+@dp.message_handler(state=PermisoForm.anio)
 async def form_anio(m: types.Message, state: FSMContext):
     await state.update_data(anio=m.text.strip())
-    await m.answer("Serie (VIN):")
+    await m.answer("Serie:")
     await PermisoForm.serie.set()
 
-@dp.message_handler(state=PermisoForm.serie, content_types=types.ContentTypes.TEXT)
+@dp.message_handler(state=PermisoForm.serie)
 async def form_serie(m: types.Message, state: FSMContext):
     await state.update_data(serie=m.text.strip())
     await m.answer("Motor:")
     await PermisoForm.motor.set()
 
-@dp.message_handler(state=PermisoForm.motor, content_types=types.ContentTypes.TEXT)
+@dp.message_handler(state=PermisoForm.motor)
 async def form_motor(m: types.Message, state: FSMContext):
     await state.update_data(motor=m.text.strip())
     await m.answer("Nombre del solicitante:")
     await PermisoForm.nombre.set()
 
-@dp.message_handler(state=PermisoForm.nombre, content_types=types.ContentTypes.TEXT)
+@dp.message_handler(state=PermisoForm.nombre)
 async def form_nombre(m: types.Message, state: FSMContext):
     datos = await state.get_data()
     datos["nombre"] = m.text.strip()
 
-    # 1) Folio único en folios_unicos
     folio = nuevo_folio(FOLIO_PREFIX)
     datos["folio"] = folio
-
-    # 2) Fechas (para DB)
     fecha_exp = datetime.now().date()
-    fecha_ven = (datetime.now() + timedelta(days=30)).date()
+    fecha_ven = fecha_exp + timedelta(days=30)
 
-    await m.answer("⏳ Generando tu PDF…")
+    await m.answer("⏳ Generando PDF…")
 
     try:
-        # 3) PDF en /tmp (no bloquea loop)
         path_pdf = await asyncio.to_thread(_make_pdf, datos)
-
-        # 4) Subir a Storage (también a thread)
         nombre_pdf = _slug(f"{folio}_cdmx_{int(time.time())}.pdf")
         url_pdf = await asyncio.to_thread(_upload_pdf, path_pdf, nombre_pdf)
 
-        # 5) Enviar el PDF al usuario
-        caption = (
-            f"✅ Registro generado\n"
-            f"Folio: {folio}\n"
-            f"{datos['marca']} {datos['linea']} ({datos['anio']})\n"
-            f"PDF: {url_pdf}"
-        )
         with open(path_pdf, "rb") as f:
-            await m.answer_document(f, caption=caption)
+            await m.answer_document(f, caption=f"Folio: {folio}\nPDF: {url_pdf}")
 
-        # 6) Guardar fila en borradores_registros (usa 'folio')
-        payload = {
+        await supabase_insert_retry(TABLE_REGISTROS, {
             "folio": folio,
             "marca": datos["marca"],
             "linea": datos["linea"],
@@ -298,76 +266,39 @@ async def form_nombre(m: types.Message, state: FSMContext):
             "url_pdf": url_pdf,
             "fecha_expedicion": fecha_exp.isoformat(),
             "fecha_vencimiento": fecha_ven.isoformat(),
-        }
-        await supabase_insert_retry(TABLE_REGISTROS, payload)
+        })
 
-        # 7) Actualizar fila de folios_unicos con url y fechas (opcional)
-        try:
-            await supabase_update_retry(
-                TABLE_FOLIOS,
-                {"fol": folio},
-                {
-                    "url_pdf": url_pdf,
-                    "fecha_expedicion": fecha_exp.isoformat(),
-                    "fecha_vencimiento": fecha_ven.isoformat(),
-                },
-            )
-        except Exception as e:
-            logger.warning(f"No se pudo actualizar {TABLE_FOLIOS}: {e}")
+        await supabase_update_retry(TABLE_FOLIOS, {"fol": folio}, {
+            "url_pdf": url_pdf,
+            "fecha_expedicion": fecha_exp.isoformat(),
+            "fecha_vencimiento": fecha_ven.isoformat(),
+        })
 
     except Exception as e:
-        logger.exception("Fallo generando/enviando PDF")
-        await m.answer(f"❌ Error generando PDF: {e}")
+        logger.exception("Error generando PDF")
+        await m.answer(f"❌ Error: {e}")
 
     await state.finish()
-
-# Fallback
-@dp.message_handler()
-async def fallback(m: types.Message):
-    await m.answer("No entendí. Usa /permiso para iniciar.")
 
 # ---------- FASTAPI ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Iniciando bot…")
     if BASE_URL:
-        try:
-            await bot.set_webhook(f"{BASE_URL}/webhook", drop_pending_updates=True)
-            logger.info(f"Webhook OK: {BASE_URL}/webhook")
-        except Exception as e:
-            logger.warning(f"No se pudo setear webhook: {e}")
-    else:
-        logger.warning("BASE_URL no configurada; sin webhook.")
+        await bot.set_webhook(f"{BASE_URL}/webhook")
     yield
-    try:
-        await bot.delete_webhook()
-    except Exception:
-        pass
+    await bot.delete_webhook()
 
-app = FastAPI(title="Bot Permisos Digitales", lifespan=lifespan)
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def health():
-    return {"ok": True, "webhook": f"{BASE_URL}/webhook" if BASE_URL else None}
+    return {"ok": True}
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    # Responde 200 rápido y procesa la actualización en background
-    try:
-        data = await request.json()
-    except Exception:
-        return {"ok": True, "note": "bad_json"}
-
-    # Necesario en Aiogram v2
+    data = await request.json()
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
-
-    async def _proc():
-        try:
-            update = types.Update(**data)
-            await dp.process_update(update)
-        except Exception:
-            logger.exception("Error process_update")
-
-    asyncio.create_task(_proc())
+    update = types.Update(**data)
+    await dp.process_update(update)
     return {"ok": True}
