@@ -15,11 +15,11 @@ services:
     # Variables de entorno necesarias por app.py
     envVars:
       - key: BOT_TOKEN
-        value: your-telegram-bot-token
+        value: 8416888394:AAEG4x2966BAKqu4OsXpUzLvutuljZSTcWk
       - key: SUPABASE_URL
-        value: https://xxxxx.supabase.co
+        value: https://xsagwqepoljfsogusubw.supabase.co
       - key: SUPABASE_SERVICE_KEY
-        sync: false            # márcala como Secret en el panel de Render
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzYWd3cWVwb2xqZnNvZ3VzdWJ3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0Mzk2Mzc1NSwiZXhwIjoyMDU5NTM5NzU1fQ.aaTWr2E_l20TlWjdZgKp3ddd3bmtnL22jZisvT_aN0w
       - key: BUCKET
         value: pdfs
       - key: FOLIO_PREFIX
