@@ -192,21 +192,16 @@ def _make_pdf(datos: dict) -> str:
 
 def _upload_pdf(path_local: str, nombre_pdf: str) -> str:
     nombre_pdf = _slug(nombre_pdf).lstrip("/")
-    
     with open(path_local, "rb") as f:
         data = f.read()
-    
-    # Método más compatible - sin parámetros extras
     try:
         supabase.storage.from_(BUCKET).upload(nombre_pdf, data)
     except Exception as e:
-        # Si falla, intenta con el método alternativo
         log.warning(f"Upload method 1 failed: {e}, trying alternative...")
-        with open(path_local, "rb") as f:
-            supabase.storage.from_(BUCKET).upload(nombre_pdf, f)
-    
+        with open(path_local, "rb") as f2:
+            supabase.storage.from_(BUCKET).upload(nombre_pdf, f2)
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
-    
+
 # ---------- FSM ----------
 class PermisoForm(StatesGroup):
     marca = State()
@@ -276,7 +271,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
         # 3) PDF en /tmp
         path_pdf = await asyncio.to_thread(_make_pdf, datos)
 
-        # 4) Subir a Storage (nombre sin espacios)
+        # 4) Subir a Storage
         nombre_pdf = f"{_slug(folio)}_cdmx_{int(time.time())}.pdf"
         url_pdf = await asyncio.to_thread(_upload_pdf, path_pdf, nombre_pdf)
 
@@ -334,12 +329,14 @@ async def fallback(m: types.Message):
 
 # Keep-alive para que Render no mate el servicio
 async def keep_alive():
+    if not BASE_URL:
+        return
     while True:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{BASE_URL}/") as resp:
+                async with session.get(f"{BASE_URL}/", timeout=10) as resp:
                     pass
-        except:
+        except Exception:
             pass
         await asyncio.sleep(600)  # cada 10 minutos
 
@@ -349,15 +346,13 @@ async def lifespan(app: FastAPI):
     log.info("Iniciando webhook…")
     try:
         if BASE_URL:
-            await bot.set_webhook(f"{BASE_URL}/webhook")
+            # Evita backlog y deja el webhook limpio
+            await bot.set_webhook(f"{BASE_URL}/webhook", drop_pending_updates=True)
             log.info(f"Webhook OK: {BASE_URL}/webhook")
         else:
             log.warning("BASE_URL no configurada; sin webhook.")
-        
-        # Iniciar keep-alive
-        if BASE_URL:
-            asyncio.create_task(keep_alive())
-            
+        # Iniciar keep-alive en background
+        asyncio.create_task(keep_alive())
     except Exception as e:
         log.warning(f"No se pudo setear webhook: {e}")
     yield
@@ -374,15 +369,21 @@ def health():
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
+    # Responder rápido y procesar en background
     try:
         data = await request.json()
     except Exception:
         return {"ok": True, "note": "bad_json"}
 
-    # Aiogram v2 requiere setear contexto
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
 
-    update = types.Update(**data)
-    await dp.process_update(update)
+    async def _proc():
+        try:
+            update = types.Update(**data)
+            await dp.process_update(update)
+        except Exception as e:
+            log.exception(f"process_update error: {e}")
+
+    asyncio.create_task(_proc())
     return {"ok": True}
