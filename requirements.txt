@@ -1,14 +1,9 @@
 fastapi==0.110.0
 uvicorn==0.29.0
 aiogram==2.25.1
-
-# FastAPI usa Pydantic v2
-pydantic==2.7.4
-
-# Supabase (esto ya trae gotrue, postgrest y httpx compatibles)
-supabase==2.4.1
-
-# PDF + QR
-PyMuPDF==1.24.9
+PyMuPDF==1.24.4
 qrcode==7.4.2
-pillow==10.4.0
+pillow==10.3.0
+supabase==2.6.0
+httpx==0.27.0
+python-dotenv==1.0.1
