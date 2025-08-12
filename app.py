@@ -244,109 +244,168 @@ class PermisoForm(StatesGroup):
     nombre = State()
 
 # ---------- HANDLERS ----------
-@dp.message_handler(Command("start"))
-async def cmd_start(m: types.Message):
+@dp.message_handler(Command("start"), state="*")
+async def cmd_start(m: types.Message, state: FSMContext):
     log.info(f"/start <- chat:{m.chat.id}")
+    # Limpiar cualquier estado activo
+    await state.finish()
+    lock_release(m.chat.id)
     await m.answer("👋 Bot listo.\nUsa /permiso para iniciar el registro.\n\nEscribe /cancel para abortar un flujo.")
 
-@dp.message_handler(commands=["cancel", "stop"])
+@dp.message_handler(commands=["cancel", "stop"], state="*")
 async def cmd_cancel(m: types.Message, state: FSMContext):
+    log.info(f"/cancel <- chat:{m.chat.id}")
     await state.finish()
     lock_release(m.chat.id)
     await m.answer("❎ Flujo cancelado. Usa /permiso para iniciar de nuevo.")
 
-@dp.message_handler(Command("permiso"))
+@dp.message_handler(Command("permiso"), state="*")
 async def permiso_init(m: types.Message, state: FSMContext):
     log.info(f"/permiso <- chat:{m.chat.id}")
-    if not lock_acquire(m.chat.id):
-        await m.answer("⚠️ Ya tienes un registro en curso. Termina o manda /cancel.")
+    
+    # Verificar si ya está en un flujo activo
+    current_state = await state.get_state()
+    if current_state is not None:
+        log.warning(f"chat:{m.chat.id} intentó /permiso pero ya está en estado: {current_state}")
+        await m.answer("⚠️ Ya tienes un registro en curso. Termina el actual o manda /cancel para empezar de nuevo.")
         return
-    await state.finish()
-    await m.answer("Marca del vehículo:")
+    
+    # Verificar lock adicional
+    if lock_busy(m.chat.id):
+        log.warning(f"chat:{m.chat.id} intentó /permiso pero tiene lock activo")
+        await m.answer("⚠️ Ya tienes un registro en curso. Espera unos minutos o manda /cancel.")
+        return
+    
+    # Adquirir lock
+    if not lock_acquire(m.chat.id):
+        log.warning(f"chat:{m.chat.id} no pudo adquirir lock")
+        await m.answer("⚠️ No se pudo iniciar el registro. Intenta en unos minutos.")
+        return
+    
+    log.info(f"chat:{m.chat.id} iniciando flujo /permiso")
+    await m.answer("📋 Iniciando registro de permiso.\n\n🚗 Marca del vehículo:")
     await PermisoForm.marca.set()
 
 @dp.message_handler(state=PermisoForm.marca, content_types=types.ContentTypes.TEXT)
 async def form_marca(m: types.Message, state: FSMContext):
-    log.info(f"marca <- chat:{m.chat.id} texto:{m.text}")
+    texto = (m.text or "").strip()
+    if not texto:
+        await m.answer("❌ La marca no puede estar vacía. Intenta de nuevo:")
+        return
+    
+    log.info(f"marca <- chat:{m.chat.id} texto:{texto}")
     lock_bump(m.chat.id)
-    await state.update_data(marca=(m.text or "").strip())
-    await m.answer("Línea (modelo/versión):")
+    await state.update_data(marca=texto)
+    await m.answer("📱 Línea (modelo/versión):")
     await PermisoForm.linea.set()
 
 @dp.message_handler(state=PermisoForm.linea, content_types=types.ContentTypes.TEXT)
 async def form_linea(m: types.Message, state: FSMContext):
-    log.info(f"linea <- chat:{m.chat.id} texto:{m.text}")
+    texto = (m.text or "").strip()
+    if not texto:
+        await m.answer("❌ La línea no puede estar vacía. Intenta de nuevo:")
+        return
+    
+    log.info(f"linea <- chat:{m.chat.id} texto:{texto}")
     lock_bump(m.chat.id)
-    await state.update_data(linea=(m.text or "").strip())
-    await m.answer("Año (4 dígitos):")
+    await state.update_data(linea=texto)
+    await m.answer("📅 Año (4 dígitos):")
     await PermisoForm.anio.set()
 
 @dp.message_handler(state=PermisoForm.anio, content_types=types.ContentTypes.TEXT)
 async def form_anio(m: types.Message, state: FSMContext):
-    log.info(f"anio <- chat:{m.chat.id} texto:{m.text}")
+    texto = (m.text or "").strip()
+    if not texto or not texto.isdigit() or len(texto) != 4:
+        await m.answer("❌ Ingresa un año válido de 4 dígitos (ej: 2020):")
+        return
+    
+    log.info(f"anio <- chat:{m.chat.id} texto:{texto}")
     lock_bump(m.chat.id)
-    await state.update_data(anio=(m.text or "").strip())
-    await m.answer("Serie (VIN):")
+    await state.update_data(anio=texto)
+    await m.answer("🔢 Serie (VIN):")
     await PermisoForm.serie.set()
 
 @dp.message_handler(state=PermisoForm.serie, content_types=types.ContentTypes.TEXT)
 async def form_serie(m: types.Message, state: FSMContext):
-    log.info(f"serie <- chat:{m.chat.id} texto:{m.text}")
+    texto = (m.text or "").strip()
+    if not texto:
+        await m.answer("❌ La serie no puede estar vacía. Intenta de nuevo:")
+        return
+    
+    log.info(f"serie <- chat:{m.chat.id} texto:{texto}")
     lock_bump(m.chat.id)
-    await state.update_data(serie=(m.text or "").strip())
-    await m.answer("Motor:")
+    await state.update_data(serie=texto)
+    await m.answer("🔧 Motor:")
     await PermisoForm.motor.set()
 
 @dp.message_handler(state=PermisoForm.motor, content_types=types.ContentTypes.TEXT)
 async def form_motor(m: types.Message, state: FSMContext):
-    log.info(f"motor <- chat:{m.chat.id} texto:{m.text}")
+    texto = (m.text or "").strip()
+    if not texto:
+        await m.answer("❌ El motor no puede estar vacío. Intenta de nuevo:")
+        return
+    
+    log.info(f"motor <- chat:{m.chat.id} texto:{texto}")
     lock_bump(m.chat.id)
-    await state.update_data(motor=(m.text or "").strip())
-    await m.answer("Nombre del solicitante:")
+    await state.update_data(motor=texto)
+    await m.answer("👤 Nombre del solicitante:")
     await PermisoForm.nombre.set()
 
 @dp.message_handler(state=PermisoForm.nombre, content_types=types.ContentTypes.TEXT)
 async def form_nombre(m: types.Message, state: FSMContext):
-    log.info(f"nombre <- chat:{m.chat.id} texto:{m.text}")
+    texto = (m.text or "").strip()
+    if not texto:
+        await m.answer("❌ El nombre no puede estar vacío. Intenta de nuevo:")
+        return
+    
+    log.info(f"nombre <- chat:{m.chat.id} texto:{texto}")
     lock_bump(m.chat.id)
     datos = await state.get_data()
-    datos["nombre"] = (m.text or "").strip()
-
-    # 1) Folio único (en thread)
-    folio = await asyncio.to_thread(nuevo_folio, FOLIO_PREFIX)
-    datos["folio"] = folio
-
-    # 2) Fechas
-    fecha_exp = datetime.now().date()
-    fecha_ven = fecha_exp + timedelta(days=30)
-
-    await m.answer("⏳ Generando tu PDF…")
+    datos["nombre"] = texto
 
     try:
+        # 1) Folio único (en thread)
+        await m.answer("⏳ Generando folio único...")
+        folio = await asyncio.to_thread(nuevo_folio, FOLIO_PREFIX)
+        datos["folio"] = folio
+        log.info(f"Folio generado: {folio} para chat:{m.chat.id}")
+
+        # 2) Fechas
+        fecha_exp = datetime.now().date()
+        fecha_ven = fecha_exp + timedelta(days=30)
+
+        await m.answer("📄 Generando tu PDF...")
+
         # 3) PDF en /tmp
         path_pdf = await asyncio.to_thread(_make_pdf, datos)
+        log.info(f"PDF generado: {path_pdf}")
 
         # 4) Subir a Storage
+        await m.answer("☁️ Subiendo a la nube...")
         nombre_pdf = f"{_slug(folio)}_cdmx_{int(time.time())}.pdf"
         url_pdf = await asyncio.to_thread(_upload_pdf, path_pdf, nombre_pdf)
+        log.info(f"PDF subido: {url_pdf}")
 
         # 5) Enviar PDF al chat (fallback a texto)
         caption = (
-            f"✅ Registro generado\n"
-            f"Folio: {folio}\n"
-            f"{datos.get('marca','')} {datos.get('linea','')} ({datos.get('anio','')})\n"
-            f"{url_pdf}"
+            f"✅ Registro generado exitosamente\n\n"
+            f"📋 Folio: <b>{folio}</b>\n"
+            f"🚗 Vehículo: {datos.get('marca','')} {datos.get('linea','')} ({datos.get('anio','')})\n"
+            f"👤 Solicitante: {datos.get('nombre','')}\n\n"
+            f"🔗 URL: {url_pdf}"
         )
+        
         try:
-            await m.answer("📄 Enviando tu PDF…")
+            await m.answer("📤 Enviando tu permiso...")
             with open(path_pdf, "rb") as f:
                 await m.answer_document(f, caption=caption)
             log.info(f"sendDocument OK chat:{m.chat.id} folio:{folio}")
         except Exception as e_doc:
-            log.warning(f"sendDocument falló: {e_doc}. Envío texto.")
+            log.warning(f"sendDocument falló: {e_doc}. Enviando como texto.")
             await m.answer(caption)
 
         # 6) Guardar registro
+        await m.answer("💾 Guardando en base de datos...")
         await supabase_insert_retry(TABLE_REGISTROS, {
             "folio": folio,
             "marca": datos.get("marca", ""),
@@ -360,6 +419,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
             "fecha_expedicion": fecha_exp.isoformat(),
             "fecha_vencimiento": fecha_ven.isoformat(),
         })
+        log.info(f"Registro guardado en BD: {folio}")
 
         # 7) Actualizar fila del folio (opcional)
         try:
@@ -375,19 +435,26 @@ async def form_nombre(m: types.Message, state: FSMContext):
         except Exception as e:
             log.warning(f"No se pudo actualizar {TABLE_FOLIOS}: {e}")
 
-        await m.answer("🎉 Listo. Si quieres otro, manda /permiso.")
+        await m.answer("🎉 ¡Permiso generado exitosamente!\n\nSi necesitas otro permiso, puedes mandar /permiso nuevamente.")
+        log.info(f"Proceso completado exitosamente para chat:{m.chat.id} folio:{folio}")
 
     except Exception as e:
-        log.exception("Fallo generando/enviando PDF")
-        await m.answer(f"❌ Error generando PDF: {e}")
+        log.exception(f"Error generando permiso para chat:{m.chat.id}")
+        await m.answer(f"❌ Error generando el permiso: {str(e)}\n\nIntenta nuevamente con /permiso")
 
-    await state.finish()
-    lock_release(m.chat.id)
+    finally:
+        # Siempre limpiar el estado y lock
+        await state.finish()
+        lock_release(m.chat.id)
 
-# Fallback
-@dp.message_handler()
-async def fallback(m: types.Message):
-    await m.answer("No entendí. Usa /permiso para iniciar o /cancel para abortar.")
+# Fallback para mensajes no reconocidos
+@dp.message_handler(content_types=types.ContentTypes.ANY)
+async def fallback(m: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state:
+        await m.answer("❌ Por favor responde con texto válido, o usa /cancel para abortar.")
+    else:
+        await m.answer("👋 ¡Hola! No entendí tu mensaje.\n\nUsa /permiso para iniciar un registro o /start para ver la ayuda.")
 
 # Keep-alive para Render
 async def keep_alive():
@@ -440,14 +507,18 @@ async def health():
 
 @app.get("/debug")
 async def debug():
-    me = await bot.get_me()
-    info = await bot.get_webhook_info()
-    return {
-        "bot": {"id": me.id, "username": me.username},
-        "webhook": info.url,
-        "pending": info.pending_update_count,
-        "active_locks": len(ACTIVE),
-    }
+    try:
+        me = await bot.get_me()
+        info = await bot.get_webhook_info()
+        return {
+            "bot": {"id": me.id, "username": me.username},
+            "webhook": info.url,
+            "pending": info.pending_update_count,
+            "active_locks": len(ACTIVE),
+            "active_states": list(ACTIVE.keys())
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -462,9 +533,10 @@ async def telegram_webhook(request: Request):
     # Log mínimo
     try:
         msg = data.get("message") or data.get("edited_message") or {}
+        chat_id = (msg.get("chat") or {}).get("id")
         frm = (msg.get("from") or {}).get("id")
-        txt = msg.get("text")
-        log.info(f"POST /webhook <- chat:{frm} text:{txt}")
+        txt = msg.get("text", "")[:50]  # Truncar para logs
+        log.info(f"POST /webhook <- chat:{chat_id} from:{frm} text:{txt}")
     except Exception:
         pass
 
