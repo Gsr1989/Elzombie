@@ -3,6 +3,31 @@ services:
     name: bot-permisos
     env: python
     plan: pro
+    autoDeploy: true
+
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
+
+    # FastAPI responde en "/"
     healthCheckPath: /
+    # Opcional: nos damos un poco más de tiempo para el primer arranque
+    healthCheckTimeoutSeconds: 120
+
+    # Variables de entorno necesarias por app.py
+    envVars:
+      - key: BOT_TOKEN
+        value: your-telegram-bot-token
+      - key: SUPABASE_URL
+        value: https://xxxxx.supabase.co
+      - key: SUPABASE_SERVICE_KEY
+        sync: false            # márcala como Secret en el panel
+      - key: BUCKET
+        value: pdfs
+      - key: FOLIO_PREFIX
+        value: "05"
+      # BASE_URL: usa la URL pública de Render para que el webhook quede bien
+      - key: BASE_URL
+        fromService:
+          type: web
+          name: bot-permisos
+          property: url        # equivale a usar RENDER_EXTERNAL_URL
