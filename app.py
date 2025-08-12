@@ -6,7 +6,7 @@
 # Guarda folio único en "folios_unicos" y registro en "borradores_registros"
 # Sube el PDF a Storage (bucket "pdfs").
 # Env: BOT_TOKEN, BASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY
-# Start cmd (Render): uvicorn app:app --host 0.0.0.0 --port 10000
+# Start cmd: uvicorn app:app --host 0.0.0.0 --port 10000
 # -------------------------------------------------------------
 
 import os
@@ -112,7 +112,6 @@ async def supabase_update_retry(table: str, match: dict, updates: dict, attempts
     last = None
     for i in range(attempts):
         try:
-            # SDK v2: update(...).match({...}).execute()
             res = supabase.table(table).update(updates).match(match).execute()
             return res.data
         except Exception as e:
@@ -177,7 +176,6 @@ def _make_pdf(datos: dict) -> str:
     qr_png = os.path.join(OUTPUT_DIR, f"{_slug(datos['folio'])}_qr.png")
     img.save(qr_png)
 
-    # QR centrado abajo
     tam_qr = 1.6 * 28.35
     ancho_pagina = pg.rect.width
     x0 = (ancho_pagina / 2) - (tam_qr / 2) - 19
@@ -214,46 +212,54 @@ class PermisoForm(StatesGroup):
 # ---------- HANDLERS ----------
 @dp.message_handler(Command("start"))
 async def cmd_start(m: types.Message):
+    log.info(f"/start <- chat:{m.chat.id}")
     await m.answer("👋 Bot listo.\nUsa /permiso para iniciar el registro.")
 
 @dp.message_handler(Command("permiso"))
 async def permiso_init(m: types.Message, state: FSMContext):
+    log.info(f"/permiso <- chat:{m.chat.id}")
     await state.finish()
     await m.answer("Marca del vehículo:")
     await PermisoForm.marca.set()
 
 @dp.message_handler(state=PermisoForm.marca, content_types=types.ContentTypes.TEXT)
 async def form_marca(m: types.Message, state: FSMContext):
+    log.info(f"marca <- chat:{m.chat.id} texto:{m.text}")
     await state.update_data(marca=(m.text or "").strip())
     await m.answer("Línea (modelo/versión):")
     await PermisoForm.linea.set()
 
 @dp.message_handler(state=PermisoForm.linea, content_types=types.ContentTypes.TEXT)
 async def form_linea(m: types.Message, state: FSMContext):
+    log.info(f"linea <- chat:{m.chat.id} texto:{m.text}")
     await state.update_data(linea=(m.text or "").strip())
     await m.answer("Año (4 dígitos):")
     await PermisoForm.anio.set()
 
 @dp.message_handler(state=PermisoForm.anio, content_types=types.ContentTypes.TEXT)
 async def form_anio(m: types.Message, state: FSMContext):
+    log.info(f"anio <- chat:{m.chat.id} texto:{m.text}")
     await state.update_data(anio=(m.text or "").strip())
     await m.answer("Serie (VIN):")
     await PermisoForm.serie.set()
 
 @dp.message_handler(state=PermisoForm.serie, content_types=types.ContentTypes.TEXT)
 async def form_serie(m: types.Message, state: FSMContext):
+    log.info(f"serie <- chat:{m.chat.id} texto:{m.text}")
     await state.update_data(serie=(m.text or "").strip())
     await m.answer("Motor:")
     await PermisoForm.motor.set()
 
 @dp.message_handler(state=PermisoForm.motor, content_types=types.ContentTypes.TEXT)
 async def form_motor(m: types.Message, state: FSMContext):
+    log.info(f"motor <- chat:{m.chat.id} texto:{m.text}")
     await state.update_data(motor=(m.text or "").strip())
     await m.answer("Nombre del solicitante:")
     await PermisoForm.nombre.set()
 
 @dp.message_handler(state=PermisoForm.nombre, content_types=types.ContentTypes.TEXT)
 async def form_nombre(m: types.Message, state: FSMContext):
+    log.info(f"nombre <- chat:{m.chat.id} texto:{m.text}")
     datos = await state.get_data()
     datos["nombre"] = (m.text or "").strip()
 
@@ -275,17 +281,21 @@ async def form_nombre(m: types.Message, state: FSMContext):
         nombre_pdf = f"{_slug(folio)}_cdmx_{int(time.time())}.pdf"
         url_pdf = await asyncio.to_thread(_upload_pdf, path_pdf, nombre_pdf)
 
-        # 5) Enviar PDF al chat
-        with open(path_pdf, "rb") as f:
-            await m.answer_document(
-                f,
-                caption=(
-                    f"✅ Registro generado\n"
-                    f"Folio: {folio}\n"
-                    f"{datos.get('marca','')} {datos.get('linea','')} ({datos.get('anio','')})\n"
-                    f"{url_pdf}"
-                )
-            )
+        # 5) Enviar PDF al chat (con fallback a texto)
+        caption = (
+            f"✅ Registro generado\n"
+            f"Folio: {folio}\n"
+            f"{datos.get('marca','')} {datos.get('linea','')} ({datos.get('anio','')})\n"
+            f"{url_pdf}"
+        )
+        try:
+            await m.answer("📄 Enviando tu PDF…")
+            with open(path_pdf, "rb") as f:
+                await m.answer_document(f, caption=caption)
+            log.info(f"sendDocument OK chat:{m.chat.id} folio:{folio}")
+        except Exception as e_doc:
+            log.warning(f"sendDocument falló: {e_doc}. Mando link por texto…")
+            await m.answer(caption)
 
         # 6) Guardar registro
         await supabase_insert_retry(TABLE_REGISTROS, {
@@ -345,10 +355,13 @@ async def keep_alive():
 async def lifespan(app: FastAPI):
     log.info("Iniciando webhook…")
     try:
-        # limpia backlog y fija webhook
         await bot.delete_webhook(drop_pending_updates=True)
         if BASE_URL:
-            await bot.set_webhook(f"{BASE_URL}/webhook", drop_pending_updates=True)
+            await bot.set_webhook(
+                f"{BASE_URL}/webhook",
+                drop_pending_updates=True,
+                allowed_updates=["message"]
+            )
             info = await bot.get_webhook_info()
             log.info(f"Webhook OK: {info.url} | pending={info.pending_update_count}")
         else:
@@ -374,7 +387,6 @@ async def health():
 
 @app.get("/debug")
 async def debug():
-    """Para revisar rápido desde Render."""
     me = await bot.get_me()
     info = await bot.get_webhook_info()
     return {
@@ -390,11 +402,9 @@ async def telegram_webhook(request: Request):
     except Exception:
         return {"ok": True, "note": "bad_json"}
 
-    # Requerido por aiogram v2
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
 
-    # Log mínimo para saber que sí llega algo
     try:
         msg = data.get("message") or data.get("edited_message") or {}
         frm = (msg.get("from") or {}).get("id")
