@@ -366,3 +366,23 @@ async def telegram_webhook(request: Request):
     update = types.Update(**data)
     await dp.process_update(update)
     return {"ok": True}
+
+import asyncio
+import aiohttp
+
+# Keep-alive para que Render no mate el servicio
+async def keep_alive():
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{BASE_URL}/") as resp:
+                    pass
+        except:
+            pass
+        await asyncio.sleep(600)  # cada 10 minutos
+
+# Iniciar keep-alive al arrancar
+@app.on_event("startup")
+async def startup():
+    if BASE_URL:
+        asyncio.create_task(keep_alive())
