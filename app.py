@@ -191,23 +191,20 @@ def _make_pdf(datos: dict) -> str:
     return out_path
 
 def _upload_pdf(path_local: str, nombre_pdf: str) -> str:
-    nombre_pdf = _slug(nombre_pdf).lstrip("/")   # <- sin slash inicial
+    nombre_pdf = _slug(nombre_pdf).lstrip("/")
+    
     with open(path_local, "rb") as f:
         data = f.read()
-
-    # Elimina si ya existe
+    
+    # Método más compatible - sin parámetros extras
     try:
-        supabase.storage.from_(BUCKET).remove([nombre_pdf])
-    except:
-        pass
-
-    # Sube el archivo
-    supabase.storage.from_(BUCKET).upload(
-        nombre_pdf,                            # p.ej. "05000060_cdmx_1754971017.pdf"
-        data,
-        file_options={"content-type": "application/pdf"}
-    )
-
+        supabase.storage.from_(BUCKET).upload(nombre_pdf, data)
+    except Exception as e:
+        # Si falla, intenta con el método alternativo
+        log.warning(f"Upload method 1 failed: {e}, trying alternative...")
+        with open(path_local, "rb") as f:
+            supabase.storage.from_(BUCKET).upload(nombre_pdf, f)
+    
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
     
 # ---------- FSM ----------
