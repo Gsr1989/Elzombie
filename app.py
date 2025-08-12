@@ -108,10 +108,8 @@ async def supabase_update_retry(table: str, match: dict, updates: dict, attempts
     last = None
     for i in range(attempts):
         try:
-            q = supabase.table(table)
-            for k, v in match.items():
-                q = q.eq(k, v)
-            res = q.update(updates).execute()
+            # SDK nuevo: update(...).match({...}).execute()
+            res = supabase.table(table).update(updates).match(match).execute()
             return res.data
         except Exception as e:
             last = e
@@ -128,7 +126,8 @@ def nuevo_folio(prefix: str = FOLIO_PREFIX) -> str:
     nid = int(ins.data[0]["id"])
     folio = f"{prefix}{nid:06d}"
     try:
-        supabase.table(TABLE_FOLIOS).update({"fol": folio}).eq("id", nid).execute()
+        # SDK nuevo: .match({"id": nid})
+        supabase.table(TABLE_FOLIOS).update({"fol": folio}).match({"id": nid}).execute()
     except Exception as e:
         log.warning(f"No pude actualizar 'fol' en {TABLE_FOLIOS}: {e}")
     return folio
