@@ -10,7 +10,6 @@ services:
 
     # FastAPI responde en "/"
     healthCheckPath: /
-    # Opcional: nos damos un poco más de tiempo para el primer arranque
     healthCheckTimeoutSeconds: 120
 
     # Variables de entorno necesarias por app.py
@@ -20,14 +19,10 @@ services:
       - key: SUPABASE_URL
         value: https://xxxxx.supabase.co
       - key: SUPABASE_SERVICE_KEY
-        sync: false            # márcala como Secret en el panel
+        sync: false            # márcala como Secret en el panel de Render
       - key: BUCKET
         value: pdfs
       - key: FOLIO_PREFIX
         value: "05"
-      # BASE_URL: usa la URL pública de Render para que el webhook quede bien
       - key: BASE_URL
-        fromService:
-          type: web
-          name: bot-permisos
-          property: url        # equivale a usar RENDER_EXTERNAL_URL
+        value: ${RENDER_EXTERNAL_URL}
