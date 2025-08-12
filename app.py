@@ -7,6 +7,7 @@
 # - Folio único con tabla folios_unicos (columna fol)
 # - Guarda datos en borradores_registros (columna folio)
 # - Supabase con service_role y reintentos básicos
+# - Webhook non-blocking + drop_pending_updates
 # -------------------------------------------------------------
 
 import os
@@ -20,7 +21,7 @@ from contextlib import asynccontextmanager
 
 import fitz               # PyMuPDF
 import qrcode
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request
 
 # Aiogram v2
 from aiogram import Bot, Dispatcher, types
@@ -120,9 +121,11 @@ def nuevo_folio(prefix: str = FOLIO_PREFIX) -> str:
     ins = supabase.table(TABLE_FOLIOS).insert({}).execute()
     nid = int(ins.data[0]["id"])
     folio = f"{prefix}{nid:06d}"
-    # si tu tabla tiene columna 'prefijo' y 'entidad', las actualizamos
+    # si tu tabla tiene columnas 'fol', 'prefijo' y 'entidad', las actualizamos
     try:
-        supabase.table(TABLE_FOLIOS).update({"fol": folio, "prefijo": prefix, "entidad": "CDMX"}).eq("id", nid).execute()
+        supabase.table(TABLE_FOLIOS).update(
+            {"fol": folio, "prefijo": prefix, "entidad": "CDMX"}
+        ).eq("id", nid).execute()
     except Exception as e:
         logger.warning(f"No pude actualizar folio en {TABLE_FOLIOS}: {e}")
     return folio
@@ -329,7 +332,7 @@ async def lifespan(app: FastAPI):
     logger.info("Iniciando bot…")
     if BASE_URL:
         try:
-            await bot.set_webhook(f"{BASE_URL}/webhook")
+            await bot.set_webhook(f"{BASE_URL}/webhook", drop_pending_updates=True)
             logger.info(f"Webhook OK: {BASE_URL}/webhook")
         except Exception as e:
             logger.warning(f"No se pudo setear webhook: {e}")
@@ -348,7 +351,8 @@ def health():
     return {"ok": True, "webhook": f"{BASE_URL}/webhook" if BASE_URL else None}
 
 @app.post("/webhook")
-async def telegram_webhook(request: Request, background: BackgroundTasks):
+async def telegram_webhook(request: Request):
+    # Responde 200 rápido y procesa la actualización en background
     try:
         data = await request.json()
     except Exception:
@@ -358,13 +362,12 @@ async def telegram_webhook(request: Request, background: BackgroundTasks):
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
 
-    # Procesa en segundo plano para responder 200 rápido
     async def _proc():
         try:
             update = types.Update(**data)
             await dp.process_update(update)
-        except Exception as e:
-            logger.exception(f"Error process_update: {e}")
+        except Exception:
+            logger.exception("Error process_update")
 
-    background.add_task(asyncio.create_task, _proc())
+    asyncio.create_task(_proc())
     return {"ok": True}
