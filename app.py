@@ -1,64 +1,47 @@
-# app.py - Bot permisos digitales CDMX con webhook persistente y keepalive
-
 import os
 import re
 import time
 import unicodedata
 import logging
 import asyncio
-import threading
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 
-import fitz               # PyMuPDF
+import fitz
 import qrcode
-import requests
 from fastapi import FastAPI, Request
-
 from aiogram import Bot, Dispatcher, types
 from aiogram.dispatcher.filters import Command
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-
 from supabase import create_client, Client
 
 # ---------- LOGGING ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("permiso-bot")
-logger.info("BOOT permiso-bot ⚙️")
 
-# ---------- ENV ----------
+# ---------- ENV / SECRETS ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BASE_URL = os.getenv("BASE_URL", "").strip().rstrip("/")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
-# Fallback con service_role expuesta (me pediste así)
-SUPABASE_SERVICE_KEY = os.getenv(
-    "SUPABASE_SERVICE_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzYWd3cWVwb2xqZnNvZ3VzdWJ3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0Mzk2Mzc1NSwiZXhwIjoyMDU5NTM5NzU1fQ.aaTWr2E_l20TlWjdZgKp3ddd3bmtnL22jZisvT_aN0w"
-)
-
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN no está configurado")
-if not SUPABASE_URL:
-    raise ValueError("SUPABASE_URL no está configurado")
-if not BASE_URL:
-    raise ValueError("BASE_URL no está configurado (URL pública de Render)")
+if not BOT_TOKEN or not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise ValueError("Faltan variables de entorno necesarias")
 
 BUCKET = os.getenv("BUCKET", "pdfs").strip()
 FOLIO_PREFIX = os.getenv("FOLIO_PREFIX", "05").strip()
 
-# ---------- Rutas / Archivos ----------
 OUTPUT_DIR = "/tmp/pdfs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 PLANTILLA_PDF = os.path.join(os.path.dirname(__file__), "cdmxdigital2025ppp.pdf")
 if not os.path.exists(PLANTILLA_PDF):
-    raise FileNotFoundError("No se encontró cdmxdigital2025ppp.pdf junto a app.py")
+    raise FileNotFoundError("No se encontró cdmxdigital2025ppp.pdf")
 
-# ---------- Supabase ----------
 TABLE_FOLIOS = "folios_unicos"
 TABLE_REGISTROS = "borradores_registros"
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ---------- BOT ----------
@@ -66,7 +49,6 @@ storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=storage)
 
-# ---------- Coordenadas ----------
 coords_cdmx = {
     "folio":   (87, 130, 14, (1, 0, 0)),
     "fecha":   (130, 145, 12, (0, 0, 0)),
@@ -79,11 +61,35 @@ coords_cdmx = {
     "nombre":  (375, 340, 11, (0, 0, 0)),
 }
 
-# ---------- Utils ----------
 def _slug(s: str) -> str:
     nfkd = unicodedata.normalize("NFKD", s or "")
     s2 = "".join(c for c in nfkd if not unicodedata.combining(c))
     return re.sub(r"[^A-Za-z0-9._-]+", "_", s2)
+
+async def supabase_insert_retry(table: str, row: dict, attempts: int = 4, delay: float = 0.6):
+    last = None
+    for i in range(attempts):
+        try:
+            res = supabase.table(table).insert(row).execute()
+            return res.data
+        except Exception as e:
+            last = e
+            await asyncio.sleep(delay * (i + 1))
+    raise last
+
+async def supabase_update_retry(table: str, match: dict, updates: dict, attempts: int = 4, delay: float = 0.6):
+    last = None
+    for i in range(attempts):
+        try:
+            q = supabase.table(table)
+            for k, v in match.items():
+                q = q.eq(k, v)
+            res = q.update(updates).execute()
+            return res.data
+        except Exception as e:
+            last = e
+            await asyncio.sleep(delay * (i + 1))
+    raise last
 
 def nuevo_folio(prefix: str = FOLIO_PREFIX) -> str:
     ins = supabase.table(TABLE_FOLIOS).insert({"prefijo": prefix, "entidad": "CDMX"}).execute()
@@ -91,8 +97,8 @@ def nuevo_folio(prefix: str = FOLIO_PREFIX) -> str:
     folio = f"{prefix}{nid:06d}"
     try:
         supabase.table(TABLE_FOLIOS).update({"fol": folio}).eq("id", nid).execute()
-    except Exception as e:
-        logger.warning(f"No pude actualizar 'fol' en {TABLE_FOLIOS}: {e}")
+    except:
+        pass
     return folio
 
 def _make_pdf(datos: dict) -> str:
@@ -131,7 +137,6 @@ def _make_pdf(datos: dict) -> str:
     qr.add_data(qr_text)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-
     qr_png = os.path.join(OUTPUT_DIR, f"{datos['folio']}_qr.png")
     img.save(qr_png)
 
@@ -152,9 +157,7 @@ def _upload_pdf(path_local: str, nombre_pdf: str) -> str:
     with open(path_local, "rb") as f:
         data = f.read()
     supabase.storage.from_(BUCKET).upload(
-        nombre_pdf,
-        data,
-        {"contentType": "application/pdf", "upsert": "true"}
+        nombre_pdf, data, {"contentType": "application/pdf", "upsert": "true"}
     )
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{nombre_pdf}"
 
@@ -167,7 +170,6 @@ class PermisoForm(StatesGroup):
     motor = State()
     nombre = State()
 
-# ---------- Handlers ----------
 @dp.message_handler(Command("start"))
 async def cmd_start(m: types.Message):
     await m.answer("👋 Bot listo.\nUsa /permiso para iniciar el registro.")
@@ -180,56 +182,56 @@ async def permiso_init(m: types.Message, state: FSMContext):
 
 @dp.message_handler(state=PermisoForm.marca)
 async def form_marca(m: types.Message, state: FSMContext):
-    await state.update_data(marca=(m.text or "").strip())
-    await m.answer("Línea:")
+    await state.update_data(marca=m.text.strip())
+    await m.answer("Línea (modelo/versión):")
     await PermisoForm.linea.set()
 
 @dp.message_handler(state=PermisoForm.linea)
 async def form_linea(m: types.Message, state: FSMContext):
-    await state.update_data(linea=(m.text or "").strip())
-    await m.answer("Año:")
+    await state.update_data(linea=m.text.strip())
+    await m.answer("Año (4 dígitos):")
     await PermisoForm.anio.set()
 
 @dp.message_handler(state=PermisoForm.anio)
 async def form_anio(m: types.Message, state: FSMContext):
-    await state.update_data(anio=(m.text or "").strip())
-    await m.answer("Serie:")
+    await state.update_data(anio=m.text.strip())
+    await m.answer("Serie (VIN):")
     await PermisoForm.serie.set()
 
 @dp.message_handler(state=PermisoForm.serie)
 async def form_serie(m: types.Message, state: FSMContext):
-    await state.update_data(serie=(m.text or "").strip())
+    await state.update_data(serie=m.text.strip())
     await m.answer("Motor:")
     await PermisoForm.motor.set()
 
 @dp.message_handler(state=PermisoForm.motor)
 async def form_motor(m: types.Message, state: FSMContext):
-    await state.update_data(motor=(m.text or "").strip())
+    await state.update_data(motor=m.text.strip())
     await m.answer("Nombre del solicitante:")
     await PermisoForm.nombre.set()
 
 @dp.message_handler(state=PermisoForm.nombre)
 async def form_nombre(m: types.Message, state: FSMContext):
     datos = await state.get_data()
-    datos["nombre"] = (m.text or "").strip()
-
+    datos["nombre"] = m.text.strip()
     folio = nuevo_folio(FOLIO_PREFIX)
     datos["folio"] = folio
-
     fecha_exp = datetime.now().date()
     fecha_ven = fecha_exp + timedelta(days=30)
 
     await m.answer("⏳ Generando tu PDF…")
-
     try:
         path_pdf = await asyncio.to_thread(_make_pdf, datos)
         nombre_pdf = _slug(f"{folio}_cdmx_{int(time.time())}.pdf")
         url_pdf = await asyncio.to_thread(_upload_pdf, path_pdf, nombre_pdf)
 
         with open(path_pdf, "rb") as f:
-            await m.answer_document(f, caption=f"✅ Folio: {folio}\nPDF: {url_pdf}")
+            await m.answer_document(
+                f,
+                caption=f"✅ Registro generado\nFolio: {folio}\nPDF: {url_pdf}"
+            )
 
-        supabase.table(TABLE_REGISTROS).insert({
+        await supabase_insert_retry(TABLE_REGISTROS, {
             "folio": folio,
             "marca": datos.get("marca", ""),
             "linea": datos.get("linea", ""),
@@ -241,34 +243,34 @@ async def form_nombre(m: types.Message, state: FSMContext):
             "url_pdf": url_pdf,
             "fecha_expedicion": fecha_exp.isoformat(),
             "fecha_vencimiento": fecha_ven.isoformat(),
-        }).execute()
+        })
+
+        await supabase_update_retry(
+            TABLE_FOLIOS, {"fol": folio},
+            {"url_pdf": url_pdf, "fecha_expedicion": fecha_exp.isoformat(), "fecha_vencimiento": fecha_ven.isoformat()}
+        )
 
     except Exception as e:
-        logger.exception("Fallo generando/enviando PDF")
         await m.answer(f"❌ Error generando PDF: {e}")
-
     await state.finish()
 
-# ---------- FastAPI ----------
+@dp.message_handler()
+async def fallback(m: types.Message):
+    await m.answer("No entendí. Usa /permiso para iniciar.")
+
+# ---------- FASTAPI ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Iniciando webhook…")
-    try:
-        await bot.set_webhook(f"{BASE_URL}/webhook", drop_pending_updates=True)
-        logger.info(f"Webhook activo: {BASE_URL}/webhook")
-    except Exception as e:
-        logger.warning(f"No se pudo setear webhook: {e}")
+    if BASE_URL:
+        await bot.set_webhook(f"{BASE_URL}/webhook")
     yield
-    try:
-        await bot.delete_webhook()
-    except Exception:
-        pass
+    await bot.delete_webhook()
 
 app = FastAPI(title="Bot Permisos Digitales", lifespan=lifespan)
 
 @app.get("/")
 def health():
-    return {"ok": True, "webhook": f"{BASE_URL}/webhook"}
+    return {"ok": True, "webhook": f"{BASE_URL}/webhook" if BASE_URL else None}
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -278,15 +280,3 @@ async def telegram_webhook(request: Request):
     update = types.Update(**data)
     await dp.process_update(update)
     return {"ok": True}
-
-# ---------- Keepalive ----------
-def keepalive():
-    while True:
-        try:
-            requests.get(f"{BASE_URL}/")
-            logger.info("Keepalive enviado ✅")
-        except Exception as e:
-            logger.warning(f"Keepalive falló: {e}")
-        time.sleep(240)  # cada 4 min
-
-threading.Thread(target=keepalive, daemon=True).start()
