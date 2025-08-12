@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # -------------------------------------------------------------
-# Aiogram v2 (FSM) + FastAPI webhook (Render)
+# Aiogram v2 (FSM) + POLLING (sin webhook)
 # Flujo /permiso: marca → linea → anio → serie → motor → nombre
 # Genera PDF desde "cdmxdigital2025ppp.pdf" (junto a app.py)
 # Folio único en "folios_unicos" y registro en "borradores_registros"
 # Sube PDF a Supabase Storage (bucket "pdfs")
-# Env: BOT_TOKEN, BASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, [FLOW_TTL]
-# Start (Render): uvicorn app:app --host 0.0.0.0 --port $PORT
+# Env: BOT_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY, [FLOW_TTL]
+# Start (Render): python app_final.py
 # -------------------------------------------------------------
 
 import os
@@ -16,19 +16,15 @@ import unicodedata
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from contextlib import asynccontextmanager
 
 import fitz               # PyMuPDF
 import qrcode
-import aiohttp
-from fastapi import FastAPI, Request
-
-# Aiogram v2
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, executor
 from aiogram.dispatcher.filters import Command
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram import types
 
 # Supabase
 from supabase import create_client, Client
@@ -39,11 +35,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 log = logging.getLogger("permiso-bot")
-log.info("BOOT permiso-bot")
+log.info("🚀 BOOT permiso-bot POLLING VERSION")
 
 # ---------- ENV ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-BASE_URL = os.getenv("BASE_URL", "").strip().rstrip("/")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
 
@@ -81,14 +76,17 @@ def lock_release(chat_id: int):
     ACTIVE.pop(chat_id, None)
 
 async def _sweeper():
+    """Limpia locks expirados cada 30 segundos"""
     while True:
         try:
             now = _now()
             dead = [cid for cid, dl in ACTIVE.items() if dl <= now]
             for cid in dead:
                 ACTIVE.pop(cid, None)
+            if dead:
+                log.info(f"Limpiados {len(dead)} locks expirados")
         except Exception as e:
-            log.warning(f"sweeper: {e}")
+            log.warning(f"sweeper error: {e}")
         await asyncio.sleep(30)
 
 # Rutas/archivos
@@ -250,7 +248,12 @@ async def cmd_start(m: types.Message, state: FSMContext):
     # Limpiar cualquier estado activo
     await state.finish()
     lock_release(m.chat.id)
-    await m.answer("👋 Bot listo.\nUsa /permiso para iniciar el registro.\n\nEscribe /cancel para abortar un flujo.")
+    await m.answer(
+        "🎯 <b>Bot de Permisos Digitales CDMX</b>\n\n"
+        "📋 Usa /permiso para iniciar el registro\n"
+        "❌ Usa /cancel para abortar un flujo\n\n"
+        "🚗 Genera permisos con QR y PDF automáticamente"
+    )
 
 @dp.message_handler(commands=["cancel", "stop"], state="*")
 async def cmd_cancel(m: types.Message, state: FSMContext):
@@ -283,7 +286,7 @@ async def permiso_init(m: types.Message, state: FSMContext):
         return
     
     log.info(f"chat:{m.chat.id} iniciando flujo /permiso")
-    await m.answer("📋 Iniciando registro de permiso.\n\n🚗 Marca del vehículo:")
+    await m.answer("📋 <b>Iniciando registro de permiso</b>\n\n🚗 Marca del vehículo:")
     await PermisoForm.marca.set()
 
 @dp.message_handler(state=PermisoForm.marca, content_types=types.ContentTypes.TEXT)
@@ -388,8 +391,8 @@ async def form_nombre(m: types.Message, state: FSMContext):
 
         # 5) Enviar PDF al chat (fallback a texto)
         caption = (
-            f"✅ Registro generado exitosamente\n\n"
-            f"📋 Folio: <b>{folio}</b>\n"
+            f"✅ <b>Registro generado exitosamente</b>\n\n"
+            f"📋 Folio: <code>{folio}</code>\n"
             f"🚗 Vehículo: {datos.get('marca','')} {datos.get('linea','')} ({datos.get('anio','')})\n"
             f"👤 Solicitante: {datos.get('nombre','')}\n\n"
             f"🔗 URL: {url_pdf}"
@@ -435,7 +438,7 @@ async def form_nombre(m: types.Message, state: FSMContext):
         except Exception as e:
             log.warning(f"No se pudo actualizar {TABLE_FOLIOS}: {e}")
 
-        await m.answer("🎉 ¡Permiso generado exitosamente!\n\nSi necesitas otro permiso, puedes mandar /permiso nuevamente.")
+        await m.answer("🎉 <b>¡Permiso generado exitosamente!</b>\n\nSi necesitas otro permiso, puedes mandar /permiso nuevamente.")
         log.info(f"Proceso completado exitosamente para chat:{m.chat.id} folio:{folio}")
 
     except Exception as e:
@@ -456,96 +459,25 @@ async def fallback(m: types.Message, state: FSMContext):
     else:
         await m.answer("👋 ¡Hola! No entendí tu mensaje.\n\nUsa /permiso para iniciar un registro o /start para ver la ayuda.")
 
-# Keep-alive para Render
-async def keep_alive():
-    if not BASE_URL:
-        return
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{BASE_URL}/", timeout=10):
-                    pass
-        except Exception as e:
-            log.warning(f"keep_alive: {e}")
-        await asyncio.sleep(600)
+# ---------- STARTUP/SHUTDOWN ----------
+async def on_startup(dp):
+    log.info("🚀 Bot iniciado con POLLING")
+    me = await bot.get_me()
+    log.info(f"Bot info: @{me.username} (ID: {me.id})")
+    # Iniciar sweeper de locks
+    asyncio.create_task(_sweeper())
 
-# ---------- FASTAPI ----------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    log.info("Iniciando webhook…")
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        if BASE_URL:
-            await bot.set_webhook(
-                f"{BASE_URL}/webhook",
-                drop_pending_updates=True,
-                allowed_updates=["message"]
-            )
-            info = await bot.get_webhook_info()
-            log.info(f"Webhook OK: {info.url} | pending={info.pending_update_count}")
-        else:
-            log.warning("BASE_URL no configurada; sin webhook.")
-        asyncio.create_task(keep_alive())
-        asyncio.create_task(_sweeper())
-    except Exception as e:
-        log.warning(f"No se pudo setear webhook: {e}")
-    yield
-    try:
-        await bot.delete_webhook()
-    except Exception:
-        pass
+async def on_shutdown(dp):
+    log.info("🛑 Bot detenido")
+    # Limpiar todos los locks
+    ACTIVE.clear()
 
-app = FastAPI(title="Bot Permisos Digitales", lifespan=lifespan)
-
-@app.get("/")
-async def health():
-    try:
-        info = await bot.get_webhook_info()
-        return {"ok": True, "webhook": info.url, "pending": info.pending_update_count}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-@app.get("/debug")
-async def debug():
-    try:
-        me = await bot.get_me()
-        info = await bot.get_webhook_info()
-        return {
-            "bot": {"id": me.id, "username": me.username},
-            "webhook": info.url,
-            "pending": info.pending_update_count,
-            "active_locks": len(ACTIVE),
-            "active_states": list(ACTIVE.keys())
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        return {"ok": True, "note": "bad_json"}
-
-    Bot.set_current(bot)
-    Dispatcher.set_current(dp)
-
-    # Log mínimo
-    try:
-        msg = data.get("message") or data.get("edited_message") or {}
-        chat_id = (msg.get("chat") or {}).get("id")
-        frm = (msg.get("from") or {}).get("id")
-        txt = msg.get("text", "")[:50]  # Truncar para logs
-        log.info(f"POST /webhook <- chat:{chat_id} from:{frm} text:{txt}")
-    except Exception:
-        pass
-
-    async def _proc():
-        try:
-            update = types.Update(**data)
-            await dp.process_update(update)
-        except Exception as e:
-            log.exception(f"process_update error: {e}")
-
-    asyncio.create_task(_proc())
-    return {"ok": True}
+# ---------- MAIN ----------
+if __name__ == '__main__':
+    # Ejecutar con polling (no webhook)
+    executor.start_polling(
+        dp, 
+        skip_updates=True,
+        on_startup=on_startup,
+        on_shutdown=on_shutdown
+                          )
