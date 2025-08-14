@@ -1,8 +1,9 @@
 fastapi
 uvicorn
-aiogram
+python-multipart
 aiohttp
-python-dotenv
 supabase
+python-dotenv
+PyMuPDF
 qrcode
-PyMuPDF==1.21.1
+aiogram==2.25.2
