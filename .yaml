@@ -5,7 +5,7 @@ services:
     plan: starter
     autoDeploy: true
 
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
 
     healthCheckPath: /
@@ -13,26 +13,14 @@ services:
 
     envVars:
       - key: BOT_TOKEN
-        value: 8416888394:AAEG4x2966BAKqu4OsXpUzLvutuljZSTcWk
-
+        value: tu-token-aqui
       - key: SUPABASE_URL
         value: https://xsagwqepoljfsogusubw.supabase.co
-
       - key: SUPABASE_SERVICE_KEY
-        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzYWd3cWVwb2xqZnNvZ3VzdWJ3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0Mzk2Mzc1NSwiZXhwIjoyMDU5NTM5NzU1fQ.aaTWr2E_l20TlWjdZgKp3ddd3bmtnL22jZisvT_aN0w
-        sync: false
-
+        sync: false  # márcala como Secret en Render
       - key: BUCKET
         value: pdfs
-
       - key: FOLIO_PREFIX
         value: "05"
-
       - key: BASE_URL
         value: ${RENDER_EXTERNAL_URL}
-
-      - key: FLOW_TTL
-        value: "300"
-
-      - key: OUTPUT_DIR
-        value: /tmp/pdfs
