@@ -1,4 +1,4 @@
-# Tu código original + FIX del bucle infinito. ESO ES TODO.
+# Tu código original + FIX de sesiones aiohttp, tasks y apagado limpio.
 
 import os
 import re
@@ -7,7 +7,7 @@ import unicodedata
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import fitz
 import qrcode
@@ -48,11 +48,11 @@ dp = Dispatcher(bot, storage=storage)
 
 def _now(): return time.time()
 def lock_busy(chat_id: int): return bool(ACTIVE.get(chat_id, 0) > _now())
-def lock_acquire(chat_id: int): 
+def lock_acquire(chat_id: int):
     if lock_busy(chat_id): return False
     ACTIVE[chat_id] = _now() + FLOW_TTL
     return True
-def lock_bump(chat_id: int): 
+def lock_bump(chat_id: int):
     if chat_id in ACTIVE: ACTIVE[chat_id] = _now() + FLOW_TTL
 def lock_release(chat_id: int): ACTIVE.pop(chat_id, None)
 
@@ -62,7 +62,8 @@ async def _sweeper():
             now = _now()
             dead = [cid for cid, dl in ACTIVE.items() if dl <= now]
             for cid in dead: ACTIVE.pop(cid, None)
-        except: pass
+        except:
+            pass
         await asyncio.sleep(30)
 
 coords_cdmx = {
@@ -73,7 +74,7 @@ coords_cdmx = {
     "nombre": (375, 340, 11, (0, 0, 0)),
 }
 
-def _slug(s): 
+def _slug(s):
     nfkd = unicodedata.normalize("NFKD", s or "")
     s2 = "".join(c for c in nfkd if not unicodedata.combining(c)).replace(" ", "_")
     return re.sub(r"[^A-Za-z0-9._-]+", "_", s2)
@@ -92,47 +93,52 @@ def nuevo_folio(prefix=FOLIO_PREFIX):
     folio = f"{prefix}{nid:06d}"
     try:
         supabase.table(TABLE_FOLIOS).update({"fol": folio}).match({"id": nid}).execute()
-    except: pass
+    except:
+        pass
     return folio
 
 def _make_pdf(datos):
     out_path = os.path.join(OUTPUT_DIR, f"{_slug(datos['folio'])}_cdmx.pdf")
     doc = fitz.open(PLANTILLA_PDF)
     pg = doc[0]
-    
+
     fecha_exp = datetime.now()
     fecha_ven = fecha_exp + timedelta(days=30)
     meses = {1:"ENERO",2:"FEBRERO",3:"MARZO",4:"ABRIL",5:"MAYO",6:"JUNIO",
              7:"JULIO",8:"AGOSTO",9:"SEPTIEMBRE",10:"OCTUBRE",11:"NOVIEMBRE",12:"DICIEMBRE"}
     fecha_visual = f"{fecha_exp.day:02d} DE {meses[fecha_exp.month]} DEL {fecha_exp.year}"
     vigencia_visual = fecha_ven.strftime("%d/%m/%Y")
-    
+
     pg.insert_text(coords_cdmx["folio"][:2], datos["folio"], fontsize=coords_cdmx["folio"][2], color=coords_cdmx["folio"][3])
     pg.insert_text(coords_cdmx["fecha"][:2], fecha_visual, fontsize=coords_cdmx["fecha"][2], color=coords_cdmx["fecha"][3])
-    
+
     for key in ["marca", "serie", "linea", "motor", "anio"]:
         x, y, s, col = coords_cdmx[key]
         pg.insert_text((x, y), str(datos.get(key, "")), fontsize=s, color=col)
-    
+
     pg.insert_text(coords_cdmx["vigencia"][:2], vigencia_visual, fontsize=coords_cdmx["vigencia"][2], color=coords_cdmx["vigencia"][3])
     pg.insert_text(coords_cdmx["nombre"][:2], datos.get("nombre", ""), fontsize=coords_cdmx["nombre"][2], color=coords_cdmx["nombre"][3])
-    
-    qr_text = f"Folio: {datos['folio']}\nMarca: {datos.get('marca','')}\nLínea: {datos.get('linea','')}\nAño: {datos.get('anio','')}\nSerie: {datos.get('serie','')}\nMotor: {datos.get('motor','')}\nNombre: {datos.get('nombre','')}\nSEMOVICDMX DIGITAL"
+
+    qr_text = (
+        f"Folio: {datos['folio']}\nMarca: {datos.get('marca','')}\nLínea: {datos.get('linea','')}\n"
+        f"Año: {datos.get('anio','')}\nSerie: {datos.get('serie','')}\nMotor: {datos.get('motor','')}\n"
+        f"Nombre: {datos.get('nombre','')}\nSEMOVICDMX DIGITAL"
+    )
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=2)
     qr.add_data(qr_text)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-    
+
     qr_png = os.path.join(OUTPUT_DIR, f"{_slug(datos['folio'])}_qr.png")
     img.save(qr_png)
-    
+
     tam_qr = 1.6 * 28.35
     ancho_pagina = pg.rect.width
     x0 = (ancho_pagina / 2) - (tam_qr / 2) - 19
     x1 = (ancho_pagina / 2) + (tam_qr / 2) - 19
     y0, y1 = 680.17, 680.17 + tam_qr
     pg.insert_image(fitz.Rect(x0, y0, x1, y1), filename=qr_png, keep_proportion=False, overlay=True)
-    
+
     doc.save(out_path)
     doc.close()
     return out_path
@@ -235,30 +241,33 @@ async def form_nombre(m, state):
     if not (texto := (m.text or "").strip()):
         await m.answer("❌ El nombre no puede estar vacío:")
         return
-    
+
     datos = await state.get_data()
     datos["nombre"] = texto
-    
+
     try:
         await m.answer("⏳ Generando folio...")
         folio = await asyncio.to_thread(nuevo_folio)
         datos["folio"] = folio
-        
+
         await m.answer("📄 Generando PDF...")
         path_pdf = await asyncio.to_thread(_make_pdf, datos)
-        
+
         await m.answer("☁️ Subiendo...")
         nombre_pdf = f"{_slug(folio)}_cdmx_{int(time.time())}.pdf"
         url_pdf = await asyncio.to_thread(_upload_pdf, path_pdf, nombre_pdf)
-        
-        caption = f"✅ Registro generado\n📋 Folio: {folio}\n🚗 {datos.get('marca','')} {datos.get('linea','')} ({datos.get('anio','')})\n👤 {datos.get('nombre','')}\n🔗 {url_pdf}"
-        
+
+        caption = (
+            f"✅ Registro generado\n📋 Folio: {folio}\n🚗 {datos.get('marca','')} "
+            f"{datos.get('linea','')} ({datos.get('anio','')})\n👤 {datos.get('nombre','')}\n🔗 {url_pdf}"
+        )
+
         try:
             with open(path_pdf, "rb") as f:
                 await m.answer_document(f, caption=caption)
         except:
             await m.answer(caption)
-        
+
         await m.answer("💾 Guardando...")
         fecha_exp = datetime.now().date()
         await supabase_insert_retry(TABLE_REGISTROS, {
@@ -268,9 +277,9 @@ async def form_nombre(m, state):
             "entidad": "CDMX", "url_pdf": url_pdf, "fecha_expedicion": fecha_exp.isoformat(),
             "fecha_vencimiento": (fecha_exp + timedelta(days=30)).isoformat(),
         })
-        
+
         await m.answer("🎉 ¡Listo! Usa /permiso para otro.")
-        
+
     except Exception as e:
         await m.answer(f"❌ Error: {e}")
     finally:
@@ -285,28 +294,60 @@ async def fallback(m, state):
     else:
         await m.answer("👋 Usa /permiso para iniciar")
 
+# ---------- KEEP-ALIVE con sesión única y cierre limpio ----------
+_keep_task = None
+_sweeper_task = None
+_keep_session: aiohttp.ClientSession | None = None
+
 async def keep_alive():
-    if not BASE_URL: return
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{BASE_URL}/", timeout=10): pass
-        except: pass
-        await asyncio.sleep(600)
+    """Ping periódico para que Railway no duerma el contenedor."""
+    global _keep_session
+    if not BASE_URL:
+        return
+    _keep_session = aiohttp.ClientSession()
+    try:
+        while True:
+            try:
+                async with _keep_session.get(f"{BASE_URL}/", timeout=10) as _:
+                    pass
+            except Exception:
+                pass
+            await asyncio.sleep(600)
+    finally:
+        if _keep_session and not _keep_session.closed:
+            await _keep_session.close()
 
 @asynccontextmanager
 async def lifespan(app):
+    global _keep_task, _sweeper_task
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         if BASE_URL:
-            await bot.set_webhook(f"{BASE_URL}/webhook", drop_pending_updates=True, allowed_updates=["message"])
-        asyncio.create_task(keep_alive())
-        asyncio.create_task(_sweeper())
-    except: pass
+            await bot.set_webhook(
+                f"{BASE_URL}/webhook",
+                drop_pending_updates=True,
+                allowed_updates=["message"],
+            )
+        _keep_task = asyncio.create_task(keep_alive())
+        _sweeper_task = asyncio.create_task(_sweeper())
+    except:
+        pass
     yield
-    try:
+    # ---- Shutdown limpio: cancelar tasks y cerrar sesiones ----
+    for t in (_keep_task, _sweeper_task):
+        if t:
+            t.cancel()
+            with suppress(asyncio.CancelledError):
+                await t
+    # Cerrar sesión keep-alive si quedó viva
+    global _keep_session
+    if _keep_session and not _keep_session.closed:
+        await _keep_session.close()
+    # Cerrar webhook y la sesión interna de aiogram (evita "Unclosed client session")
+    with suppress(Exception):
         await bot.delete_webhook()
-    except: pass
+    with suppress(Exception):
+        await bot.session.close()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -328,7 +369,3 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
     except:
         return {"ok": True}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
