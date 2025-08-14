@@ -1,9 +1,9 @@
-fastapi
-uvicorn
-python-multipart
-aiohttp==3.8.6
-supabase
-python-dotenv
-PyMuPDF
-qrcode
+fastapi==0.110.0
+uvicorn==0.29.0
+python-multipart==0.0.9
+aiohttp==3.9.5
+supabase==1.0.3
+python-dotenv==1.0.1
+pymupdf==1.23.6
+qrcode==7.4.2
 aiogram==2.25.2
