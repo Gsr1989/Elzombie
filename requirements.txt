@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 python-multipart
-aiohttp
+aiohttp==3.8.6
 supabase
 python-dotenv
 PyMuPDF
