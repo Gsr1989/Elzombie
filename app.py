@@ -1,13 +1,13 @@
-# app.py — Bot de Telegram con FastAPI y Supabase (versión corregida)
+# app.py — Bot de Telegram con FastAPI y Supabase (aiogram v3)
 
 import os, re, time, asyncio, unicodedata, qrcode, logging, aiohttp, fitz
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.dispatcher.filters import Command
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import Command
 from contextlib import asynccontextmanager, suppress
 from supabase import create_client
 
@@ -29,7 +29,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 logging.basicConfig(level=logging.INFO)
 
 # Candados anti-spam
@@ -38,6 +38,7 @@ def _now(): return time.time()
 def lock_acquire(cid): return not ACTIVE.get(cid, 0) > _now() and not ACTIVE.update({cid: _now()+FLOW_TTL})
 def lock_bump(cid): ACTIVE[cid] = _now() + FLOW_TTL
 def lock_release(cid): ACTIVE.pop(cid, None)
+
 async def _sweeper():
     while True:
         await asyncio.sleep(30)
@@ -128,74 +129,85 @@ class PermisoForm(StatesGroup):
     motor = State()
     nombre = State()
 
-# Telegram handlers
-@dp.message_handler(Command("start"), state="*")
-async def cmd_start(m, state):
-    await state.finish(); lock_release(m.chat.id)
-    await m.answer("👋 Bot listo. Usa /permiso para iniciar.")
+# Telegram handlers (aiogram v3)
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    lock_release(message.chat.id)
+    await message.answer("👋 Bot listo. Usa /permiso para iniciar.")
 
-@dp.message_handler(commands=["cancel", "stop"], state="*")
-async def cmd_cancel(m, state):
-    await state.finish(); lock_release(m.chat.id)
-    await m.answer("❎ Flujo cancelado.")
+@dp.message(Command("cancel", "stop"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    lock_release(message.chat.id)
+    await message.answer("❎ Flujo cancelado.")
 
-@dp.message_handler(Command("permiso"), state="*")
-async def permiso_init(m, state):
-    if await state.get_state(): return await m.answer("⚠️ Ya tienes uno activo. Manda /cancel.")
-    if not lock_acquire(m.chat.id): return await m.answer("⏳ Espera unos minutos.")
-    await m.answer("🚗 Marca del vehículo:")
-    await PermisoForm.marca.set()
+@dp.message(Command("permiso"))
+async def permiso_init(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state:
+        return await message.answer("⚠️ Ya tienes uno activo. Manda /cancel.")
+    if not lock_acquire(message.chat.id):
+        return await message.answer("⏳ Espera unos minutos.")
+    await message.answer("🚗 Marca del vehículo:")
+    await state.set_state(PermisoForm.marca)
 
-@dp.message_handler(state=PermisoForm.marca)
-async def step_marca(m, state):
-    lock_bump(m.chat.id)
-    await state.update_data(marca=m.text.strip())
-    await m.answer("📱 Línea:")
-    await PermisoForm.linea.set()
+@dp.message(PermisoForm.marca)
+async def step_marca(message: types.Message, state: FSMContext):
+    lock_bump(message.chat.id)
+    await state.update_data(marca=message.text.strip())
+    await message.answer("📱 Línea:")
+    await state.set_state(PermisoForm.linea)
 
-@dp.message_handler(state=PermisoForm.linea)
-async def step_linea(m, state):
-    lock_bump(m.chat.id)
-    await state.update_data(linea=m.text.strip())
-    await m.answer("📅 Año (4 dígitos):")
-    await PermisoForm.anio.set()
+@dp.message(PermisoForm.linea)
+async def step_linea(message: types.Message, state: FSMContext):
+    lock_bump(message.chat.id)
+    await state.update_data(linea=message.text.strip())
+    await message.answer("📅 Año (4 dígitos):")
+    await state.set_state(PermisoForm.anio)
 
-@dp.message_handler(state=PermisoForm.anio)
-async def step_anio(m, state):
-    txt = m.text.strip()
+@dp.message(PermisoForm.anio)
+async def step_anio(message: types.Message, state: FSMContext):
+    txt = message.text.strip()
     if not txt.isdigit() or len(txt) != 4:
-        return await m.answer("❌ Año inválido. Intenta de nuevo:")
-    lock_bump(m.chat.id)
+        return await message.answer("❌ Año inválido. Intenta de nuevo:")
+    lock_bump(message.chat.id)
     await state.update_data(anio=txt)
-    await m.answer("🔢 Serie:")
-    await PermisoForm.serie.set()
+    await message.answer("🔢 Serie:")
+    await state.set_state(PermisoForm.serie)
 
-@dp.message_handler(state=PermisoForm.serie)
-async def step_serie(m, state):
-    lock_bump(m.chat.id)
-    await state.update_data(serie=m.text.strip())
-    await m.answer("🔧 Motor:")
-    await PermisoForm.motor.set()
+@dp.message(PermisoForm.serie)
+async def step_serie(message: types.Message, state: FSMContext):
+    lock_bump(message.chat.id)
+    await state.update_data(serie=message.text.strip())
+    await message.answer("🔧 Motor:")
+    await state.set_state(PermisoForm.motor)
 
-@dp.message_handler(state=PermisoForm.motor)
-async def step_motor(m, state):
-    lock_bump(m.chat.id)
-    await state.update_data(motor=m.text.strip())
-    await m.answer("👤 Nombre del contribuyente:")
-    await PermisoForm.nombre.set()
+@dp.message(PermisoForm.motor)
+async def step_motor(message: types.Message, state: FSMContext):
+    lock_bump(message.chat.id)
+    await state.update_data(motor=message.text.strip())
+    await message.answer("👤 Nombre del contribuyente:")
+    await state.set_state(PermisoForm.nombre)
 
-@dp.message_handler(state=PermisoForm.nombre)
-async def step_nombre(m, state):
+@dp.message(PermisoForm.nombre)
+async def step_nombre(message: types.Message, state: FSMContext):
     datos = await state.get_data()
-    datos["nombre"] = m.text.strip()
+    datos["nombre"] = message.text.strip()
     try:
         folio = await asyncio.to_thread(nuevo_folio)
         datos["folio"] = folio
-        await m.answer("📄 Generando PDF...")
+        await message.answer("📄 Generando PDF...")
         path = await asyncio.to_thread(_make_pdf, datos)
         nombre_pdf = f"{folio}_{int(time.time())}.pdf"
         url_pdf = await asyncio.to_thread(_upload_pdf, path, nombre_pdf)
-        await m.answer_document(open(path, "rb"), caption=f"✅ PDF listo\nFolio: {folio}\n🔗 {url_pdf}")
+        
+        with open(path, "rb") as pdf_file:
+            await message.answer_document(
+                types.BufferedInputFile(pdf_file.read(), filename=f"{folio}.pdf"),
+                caption=f"✅ PDF listo\nFolio: {folio}\n🔗 {url_pdf}"
+            )
+        
         await supabase_insert_retry(TABLE_REGISTROS, {
             "folio": folio, "marca": datos["marca"], "linea": datos["linea"], "anio": datos["anio"],
             "numero_serie": datos["serie"], "numero_motor": datos["motor"], "nombre": datos["nombre"],
@@ -203,16 +215,17 @@ async def step_nombre(m, state):
             "fecha_expedicion": datetime.now().date().isoformat(),
             "fecha_vencimiento": (datetime.now().date() + timedelta(days=30)).isoformat(),
         })
-        await m.answer("🎉 ¡Listo! Usa /permiso para otro.")
+        await message.answer("🎉 ¡Listo! Usa /permiso para otro.")
     except Exception as e:
         logging.exception("❌ Error generando permiso")
-        await m.answer(f"❌ Error: {e}")
+        await message.answer(f"❌ Error: {e}")
     finally:
-        await state.finish(); lock_release(m.chat.id)
+        await state.clear()
+        lock_release(message.chat.id)
 
-@dp.message_handler()
-async def fallback(m, state):
-    await m.answer("👋 Usa /permiso para iniciar")
+@dp.message()
+async def fallback(message: types.Message):
+    await message.answer("👋 Usa /permiso para iniciar")
 
 # FASTAPI + webhook
 _keep_task = _sweeper_task = None
@@ -224,8 +237,10 @@ async def keep_alive():
     _keep_session = aiohttp.ClientSession()
     try:
         while True:
-            try: await _keep_session.get(f"{BASE_URL}/", timeout=10)
-            except: pass
+            try: 
+                await _keep_session.get(f"{BASE_URL}/", timeout=10)
+            except: 
+                pass
             await asyncio.sleep(600)
     finally:
         if _keep_session and not _keep_session.closed:
@@ -247,20 +262,24 @@ async def lifespan(app):
                 await t
     if _keep_session and not _keep_session.closed:
         await _keep_session.close()
-    with suppress(Exception): await bot.delete_webhook()
-    with suppress(Exception): await bot.session.close()
+    with suppress(Exception): 
+        await bot.delete_webhook()
+    with suppress(Exception): 
+        await bot.session.close()
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def health():
-    try: info = await bot.get_webhook_info(); return {"ok": True, "webhook": info.url}
-    except Exception as e: return {"ok": False, "error": str(e)}
+    try: 
+        info = await bot.get_webhook_info()
+        return {"ok": True, "webhook": info.url}
+    except Exception as e: 
+        return {"ok": False, "error": str(e)}
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
-    Bot.set_current(bot)
-    Dispatcher.set_current(dp)
-    asyncio.create_task(dp.process_update(types.Update(**data)))
+    update = types.Update(**data)
+    await dp.feed_update(bot, update)
     return {"ok": True}
