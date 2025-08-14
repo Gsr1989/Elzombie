@@ -1,10 +1,8 @@
-fastapi==0.110.0
-uvicorn==0.29.0
-aiogram==2.25.1
+fastapi
+uvicorn
+aiogram
+aiohttp
+python-dotenv
+supabase
+qrcode
 PyMuPDF==1.21.1
-qrcode==7.4.2
-pillow==10.3.0
-supabase==1.0.3
-httpx==0.27.0
-python-dotenv==1.0.1
-aiohttp==3.9.5
