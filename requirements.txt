@@ -1,7 +1,7 @@
 fastapi==0.110.0
 uvicorn==0.29.0
 aiogram==2.25.1
-PyMuPDF==1.23.21
+PyMuPDF==1.21.1
 qrcode==7.4.2
 pillow==10.3.0
 supabase==1.0.3
