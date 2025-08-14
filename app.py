@@ -1,4 +1,4 @@
-# app.py — Bot de Telegram con FastAPI y Supabase (versión limpia)
+# app.py — Bot de Telegram con FastAPI y Supabase (versión corregida)
 
 import os, re, time, asyncio, unicodedata, qrcode, logging, aiohttp, fitz
 from datetime import datetime, timedelta
@@ -241,7 +241,10 @@ async def lifespan(app):
     _sweeper_task = asyncio.create_task(_sweeper())
     yield
     for t in (_keep_task, _sweeper_task):
-        if t: t.cancel(); with suppress(asyncio.CancelledError): await t
+        if t:
+            t.cancel()
+            with suppress(asyncio.CancelledError):
+                await t
     if _keep_session and not _keep_session.closed:
         await _keep_session.close()
     with suppress(Exception): await bot.delete_webhook()
