@@ -1,2 +1,4 @@
 libmupdf-dev
 mupdf-tools
+build-essential
+python3-dev
