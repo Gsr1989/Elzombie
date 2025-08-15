@@ -1,26 +1,9 @@
 services:
   - type: web
-    name: bot-permisos
-    env: python
-    plan: starter
-    autoDeploy: true
-
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
-
-    healthCheckPath: /
-    healthCheckTimeoutSeconds: 120
-
+    name: Elzombie2
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app:app --host 0.0.0.0 --port 10000"
     envVars:
-      - key: BOT_TOKEN
-        value: tu-token-aqui
-      - key: SUPABASE_URL
-        value: https://xsagwqepoljfsogusubw.supabase.co
-      - key: SUPABASE_SERVICE_KEY
-        sync: false  # márcala como Secret en Render
-      - key: BUCKET
-        value: pdfs
-      - key: FOLIO_PREFIX
-        value: "05"
-      - key: BASE_URL
-        value: ${RENDER_EXTERNAL_URL}
+      - key: PYTHON_VERSION
+        value: 3.10
