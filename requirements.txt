@@ -1,6 +1,3 @@
---upgrade pip
---only-binary :all:
-
 fastapi==0.95.2
 uvicorn==0.22.0
 python-telegram-bot==13.15
