@@ -7,4 +7,4 @@ Pillow==9.5.0
 requests==2.31.0
 supabase==0.7.1
 python-dotenv==1.0.1
-PyMuPDF==1.23.7
+--no-binary=PyMuPDF PyMuPDF==1.23.7
