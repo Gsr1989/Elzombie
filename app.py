@@ -1,4 +1,13 @@
-from fastapi import FastAPI, Request from aiogram import Bot, Dispatcher, types from aiogram.contrib.fsm_storage.memory import MemoryStorage from aiogram.dispatcher.filters.state import State, StatesGroup from aiogram.dispatcher import FSMContext from aiogram.dispatcher.filters import Command from contextlib import asynccontextmanager, suppress from datetime import datetime, timedelta from supabase import create_client, Client import asyncio, os, time, fitz
+from fastapi import FastAPI, Request
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters import Command
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta
+from supabase import create_client, Client
+import asyncio, os, time, fitz
 
 --- CONFIG ---
 
