@@ -51,13 +51,17 @@ class PermisoForm(StatesGroup):
 def generar_pdf_principal(datos: dict) -> str:
     doc = fitz.open(PLANTILLA_PDF)
     page = doc[0]
-    page.insert_text((100, 100), f"FOLIO: {datos['folio']}", fontsize=12)
-    page.insert_text((100, 120), f"MARCA: {datos['marca']}", fontsize=12)
-    page.insert_text((100, 140), f"LÍNEA: {datos['linea']}", fontsize=12)
-    page.insert_text((100, 160), f"AÑO: {datos['anio']}", fontsize=12)
-    page.insert_text((100, 180), f"SERIE: {datos['serie']}", fontsize=12)
-    page.insert_text((100, 200), f"MOTOR: {datos['motor']}", fontsize=12)
-    page.insert_text((100, 220), f"NOMBRE: {datos['nombre']}", fontsize=12)
+
+    page.insert_text((87, 130), datos["folio"], fontsize=14, color=(1, 0, 0))         # FOLIO
+    page.insert_text((130, 145), datos["fecha"], fontsize=12, color=(0, 0, 0))        # FECHA
+    page.insert_text((87, 290), datos["marca"], fontsize=11, color=(0, 0, 0))         # MARCA
+    page.insert_text((375, 290), datos["serie"], fontsize=11, color=(0, 0, 0))        # SERIE
+    page.insert_text((87, 307), datos["linea"], fontsize=11, color=(0, 0, 0))         # LINEA
+    page.insert_text((375, 307), datos["motor"], fontsize=11, color=(0, 0, 0))        # MOTOR
+    page.insert_text((87, 323), datos["anio"], fontsize=11, color=(0, 0, 0))          # AÑO
+    page.insert_text((375, 323), datos["vigencia"], fontsize=11, color=(0, 0, 0))     # VIGENCIA
+    page.insert_text((375, 340), datos["nombre"], fontsize=11, color=(0, 0, 0))       # NOMBRE
+
     filename = f"{OUTPUT_DIR}/{datos['folio']}_principal.pdf"
     doc.save(filename)
     return filename
