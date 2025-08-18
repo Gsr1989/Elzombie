@@ -1,9 +1,10 @@
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
+from aiogram.types import FSInputFile
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from supabase import create_client, Client
@@ -121,15 +122,12 @@ async def get_nombre(message: types.Message, state: FSMContext):
         p1 = generar_pdf_principal(datos)
         p2 = generar_pdf_bueno(datos["serie"], datetime.now(), datos["folio"])
 
-        # Aiogram 3.x usa InputFile para archivos
-        from aiogram.types import FSInputFile
-        
         await message.answer_document(
-            FSInputFile(p1), 
+            FSInputFile(p1),
             caption=f"📄 Principal - Folio: {datos['folio']}"
         )
         await message.answer_document(
-            FSInputFile(p2), 
+            FSInputFile(p2),
             caption=f"✅ EL BUENO - Serie: {datos['serie']}"
         )
 
