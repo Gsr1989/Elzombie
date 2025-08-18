@@ -1,9 +1,9 @@
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters import Command
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from supabase import create_client, Client
@@ -28,7 +28,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ------------ BOT ------------
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 
 # ------------ FOLIO ------------
 folio_counter = {"count": 1}
@@ -71,58 +71,67 @@ def generar_pdf_bueno(serie: str, fecha: datetime, folio: str) -> str:
     return filename
 
 # ------------ HANDLERS ------------
-@dp.message_handler(Command("start"), state="*")
-async def start_cmd(m: types.Message, state: FSMContext):
-    await state.finish()
-    await m.answer("👋 Bienvenido. Usa /permiso para iniciar")
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("👋 Bienvenido. Usa /permiso para iniciar")
 
-@dp.message_handler(Command("permiso"), state="*")
-async def permiso_cmd(m: types.Message):
-    await m.answer("Marca del vehículo:")
-    await PermisoForm.marca.set()
+@dp.message(Command("permiso"))
+async def permiso_cmd(message: types.Message, state: FSMContext):
+    await message.answer("Marca del vehículo:")
+    await state.set_state(PermisoForm.marca)
 
-@dp.message_handler(state=PermisoForm.marca)
-async def get_marca(m: types.Message, state: FSMContext):
-    await state.update_data(marca=m.text.strip())
-    await m.answer("Línea:")
-    await PermisoForm.linea.set()
+@dp.message(PermisoForm.marca)
+async def get_marca(message: types.Message, state: FSMContext):
+    await state.update_data(marca=message.text.strip())
+    await message.answer("Línea:")
+    await state.set_state(PermisoForm.linea)
 
-@dp.message_handler(state=PermisoForm.linea)
-async def get_linea(m: types.Message, state: FSMContext):
-    await state.update_data(linea=m.text.strip())
-    await m.answer("Año:")
-    await PermisoForm.anio.set()
+@dp.message(PermisoForm.linea)
+async def get_linea(message: types.Message, state: FSMContext):
+    await state.update_data(linea=message.text.strip())
+    await message.answer("Año:")
+    await state.set_state(PermisoForm.anio)
 
-@dp.message_handler(state=PermisoForm.anio)
-async def get_anio(m: types.Message, state: FSMContext):
-    await state.update_data(anio=m.text.strip())
-    await m.answer("Serie:")
-    await PermisoForm.serie.set()
+@dp.message(PermisoForm.anio)
+async def get_anio(message: types.Message, state: FSMContext):
+    await state.update_data(anio=message.text.strip())
+    await message.answer("Serie:")
+    await state.set_state(PermisoForm.serie)
 
-@dp.message_handler(state=PermisoForm.serie)
-async def get_serie(m: types.Message, state: FSMContext):
-    await state.update_data(serie=m.text.strip())
-    await m.answer("Motor:")
-    await PermisoForm.motor.set()
+@dp.message(PermisoForm.serie)
+async def get_serie(message: types.Message, state: FSMContext):
+    await state.update_data(serie=message.text.strip())
+    await message.answer("Motor:")
+    await state.set_state(PermisoForm.motor)
 
-@dp.message_handler(state=PermisoForm.motor)
-async def get_motor(m: types.Message, state: FSMContext):
-    await state.update_data(motor=m.text.strip())
-    await m.answer("Nombre del solicitante:")
-    await PermisoForm.nombre.set()
+@dp.message(PermisoForm.motor)
+async def get_motor(message: types.Message, state: FSMContext):
+    await state.update_data(motor=message.text.strip())
+    await message.answer("Nombre del solicitante:")
+    await state.set_state(PermisoForm.nombre)
 
-@dp.message_handler(state=PermisoForm.nombre)
-async def get_nombre(m: types.Message, state: FSMContext):
+@dp.message(PermisoForm.nombre)
+async def get_nombre(message: types.Message, state: FSMContext):
     datos = await state.get_data()
-    datos["nombre"] = m.text.strip()
+    datos["nombre"] = message.text.strip()
     datos["folio"] = nuevo_folio()
 
     try:
         p1 = generar_pdf_principal(datos)
         p2 = generar_pdf_bueno(datos["serie"], datetime.now(), datos["folio"])
 
-        await m.answer_document(open(p1, "rb"), caption=f"📄 Principal - Folio: {datos['folio']}")
-        await m.answer_document(open(p2, "rb"), caption=f"✅ EL BUENO - Serie: {datos['serie']}")
+        # Aiogram 3.x usa InputFile para archivos
+        from aiogram.types import FSInputFile
+        
+        await message.answer_document(
+            FSInputFile(p1), 
+            caption=f"📄 Principal - Folio: {datos['folio']}"
+        )
+        await message.answer_document(
+            FSInputFile(p2), 
+            caption=f"✅ EL BUENO - Serie: {datos['serie']}"
+        )
 
         fecha_exp = datetime.now().date()
         fecha_ven = fecha_exp + timedelta(days=30)
@@ -139,15 +148,15 @@ async def get_nombre(m: types.Message, state: FSMContext):
             "entidad": "cdmx",
         }).execute()
 
-        await m.answer("✅ Permiso guardado y registrado correctamente.")
+        await message.answer("✅ Permiso guardado y registrado correctamente.")
     except Exception as e:
-        await m.answer(f"❌ Error al generar: {e}")
+        await message.answer(f"❌ Error al generar: {e}")
     finally:
-        await state.finish()
+        await state.clear()
 
-@dp.message_handler()
-async def fallback(m: types.Message):
-    await m.answer("Usa /permiso para iniciar.")
+@dp.message()
+async def fallback(message: types.Message):
+    await message.answer("Usa /permiso para iniciar.")
 
 # ------------ FASTAPI + LIFESPAN ------------
 _keep_task = None
@@ -176,7 +185,5 @@ app = FastAPI(lifespan=lifespan)
 async def telegram_webhook(request: Request):
     data = await request.json()
     update = types.Update(**data)
-    Bot.set_current(bot)
-    Dispatcher.set_current(dp)
-    asyncio.create_task(dp.process_update(update))
+    await dp.feed_webhook_update(bot, update)
     return {"ok": True}
