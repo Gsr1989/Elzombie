@@ -122,9 +122,21 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos["nombre"] = message.text.strip()
     datos["folio"] = nuevo_folio()
 
+    # -------- FECHAS FORMATOS --------
+    hoy = datetime.now()
+    meses = {
+        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
+    }
+    datos["fecha"] = f"{hoy.day} de {meses[hoy.month]} del {hoy.year}"
+    fecha_ven = hoy + timedelta(days=30)
+    datos["vigencia"] = fecha_ven.strftime("%d/%m/%Y")
+    # ---------------------------------
+
     try:
         p1 = generar_pdf_principal(datos)
-        p2 = generar_pdf_bueno(datos["serie"], datetime.now(), datos["folio"])
+        p2 = generar_pdf_bueno(datos["serie"], hoy, datos["folio"])
 
         await message.answer_document(
             FSInputFile(p1),
@@ -135,8 +147,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
             caption=f"✅ EL BUENO - Serie: {datos['serie']}"
         )
 
-        fecha_exp = datetime.now().date()
-        fecha_ven = fecha_exp + timedelta(days=30)
         supabase.table("folios_registrados").insert({
             "folio": datos["folio"],
             "marca": datos["marca"],
@@ -145,8 +155,8 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "numero_serie": datos["serie"],
             "numero_motor": datos["motor"],
             "nombre": datos["nombre"],
-            "fecha_expedicion": fecha_exp.isoformat(),
-            "fecha_vencimiento": fecha_ven.isoformat(),
+            "fecha_expedicion": hoy.date().isoformat(),
+            "fecha_vencimiento": fecha_ven.date().isoformat(),
             "entidad": "cdmx",
         }).execute()
 
