@@ -1,6 +1,7 @@
 fastapi
-python-telegram-bot
+aiogram
 supabase
-PyMuPDF
+PyMuPDF==1.21.1
 uvicorn
 python-multipart
+aiohttp
