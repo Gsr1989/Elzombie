@@ -35,10 +35,11 @@ dp = Dispatcher(storage=storage)
 def obtener_ultimo_folio():
     """Obtiene el último folio de la base de datos para continuar secuencia"""
     try:
+        # NO usar "id" porque no existe esa columna, usar "created_at" o el nombre real
         result = supabase.table("folios_registrados")\
             .select("folio")\
             .eq("entidad", "cdmx")\
-            .order("id", desc=True)\
+            .order("folio", desc=True)\
             .limit(1)\
             .execute()
         
@@ -53,19 +54,19 @@ def obtener_ultimo_folio():
                 print(f"Número extraído: {numero}, siguiente será: {siguiente}")
                 return siguiente
             
-            # Si no empieza con 881, empezar desde 102 (porque 88102 está vacante)
-            print("Folio no empieza con 881, empezando desde 102")
-            return 102
+            # Si no empieza con 881, empezar desde 200 (para evitar conflictos)
+            print("Folio no empieza con 881, empezando desde 200")
+            return 200
         
-        # Si no hay folios, empezar desde 102
-        print("No hay folios, empezando desde 102")
-        return 102
+        # Si no hay folios, empezar desde 200
+        print("No hay folios, empezando desde 200")
+        return 200
     except Exception as e:
         print(f"Error obteniendo último folio: {e}")
-        return 102
+        return 200
 
 def generar_folio_secuencial():
-    """Genera folio 881 + secuencial infinito desde 102"""
+    """Genera folio 881 + secuencial infinito desde 200"""
     siguiente_numero = obtener_ultimo_folio()
     nuevo_folio = f"881{siguiente_numero}"
     print(f"Generando nuevo folio: {nuevo_folio}")
