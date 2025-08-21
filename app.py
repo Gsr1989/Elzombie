@@ -44,20 +44,20 @@ def obtener_ultimo_folio():
         
         if result.data:
             ultimo_folio = result.data[0]["folio"]
-            # Extraer número después del 891
-            if ultimo_folio.startswith("891"):
+            # Extraer número después del 8810
+            if ultimo_folio.startswith("8810"):
                 numero = int(ultimo_folio[3:])
                 return numero + 1
         
-        # Si no hay folios, empezar desde 891 (primer folio será 8911)
+        # Si no hay folios, empezar desde 8810 (primer folio será 8810)
         return 1
     except:
         return 1
 
 def generar_folio_secuencial():
-    """Genera folio 891 + secuencial infinito"""
+    """Genera folio 8810 + secuencial infinito"""
     siguiente_numero = obtener_ultimo_folio()
-    return f"891{siguiente_numero}"
+    return f"8810{siguiente_numero}"
 
 # ------------ FSM STATES ------------
 class PermisoForm(StatesGroup):
