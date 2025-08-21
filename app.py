@@ -31,7 +31,7 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ------------ FOLIO PERSISTENTE (DESDE 8811X) ------------
+# ------------ FOLIO PERSISTENTE (DESDE 88102) ------------
 def obtener_ultimo_folio():
     """Obtiene el último folio de la base de datos para continuar secuencia"""
     try:
@@ -46,28 +46,28 @@ def obtener_ultimo_folio():
             ultimo_folio = result.data[0]["folio"]
             print(f"Último folio encontrado: {ultimo_folio}")
             
-            # Si empieza con "8811", extraer el número después
-            if ultimo_folio.startswith("8811"):
-                numero = int(ultimo_folio[4:])  # Quitar "8811" 
+            # Si empieza con "881", extraer el número después
+            if ultimo_folio.startswith("881"):
+                numero = int(ultimo_folio[3:])  # Quitar "881" 
                 siguiente = numero + 1
                 print(f"Número extraído: {numero}, siguiente será: {siguiente}")
                 return siguiente
             
-            # Si no empieza con 8811, empezar desde 1
-            print("Folio no empieza con 8811, empezando desde 1")
-            return 1
+            # Si no empieza con 881, empezar desde 102 (porque 88102 está vacante)
+            print("Folio no empieza con 881, empezando desde 102")
+            return 102
         
-        # Si no hay folios, empezar desde 1
-        print("No hay folios, empezando desde 1")
-        return 1
+        # Si no hay folios, empezar desde 102
+        print("No hay folios, empezando desde 102")
+        return 102
     except Exception as e:
         print(f"Error obteniendo último folio: {e}")
-        return 1
+        return 102
 
 def generar_folio_secuencial():
-    """Genera folio 8811 + secuencial infinito"""
+    """Genera folio 881 + secuencial infinito desde 102"""
     siguiente_numero = obtener_ultimo_folio()
-    nuevo_folio = f"8811{siguiente_numero}"
+    nuevo_folio = f"881{siguiente_numero}"
     print(f"Generando nuevo folio: {nuevo_folio}")
     return nuevo_folio
 
