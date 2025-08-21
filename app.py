@@ -374,18 +374,34 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "estado": "PENDIENTE_PAGO"
         }).execute()
         
-        await message.answer("🔧 **PASO 4: Enviando documentos...**")
+        await message.answer("🔧 **PASO 4: Verificando archivos...**")
+        
+        # Verificar que los archivos existen
+        if not os.path.exists(p1):
+            await message.answer(f"❌ Error: No se generó {p1}")
+            return
+        if not os.path.exists(p2):
+            await message.answer(f"❌ Error: No se generó {p2}")
+            return
+            
+        await message.answer("🔧 **PASO 5: Enviando documentos...**")
 
         # Enviar documentos
-        await message.answer_document(
-            FSInputFile(p1),
-            caption=f"📄 **PERMISO PRINCIPAL OFICIAL**\n🆔 **Folio:** {datos['folio']}\n🏛️ **CDMX Digital**"
-        )
-        
-        await message.answer_document(
-            FSInputFile(p2),
-            caption=f"📋 **COMPROBANTE DE TRÁMITE**\n🔢 **Serie:** {datos['serie']}\n✅ **EL BUENO**"
-        )
+        try:
+            await message.answer_document(
+                FSInputFile(p1),
+                caption=f"📄 PERMISO PRINCIPAL OFICIAL\n🆔 Folio: {datos['folio']}\n🏛️ CDMX Digital"
+            )
+        except Exception as e:
+            await message.answer(f"❌ Error enviando PDF principal: {e}")
+            
+        try:
+            await message.answer_document(
+                FSInputFile(p2),
+                caption=f"📋 COMPROBANTE DE TRÁMITE\n🔢 Serie: {datos['serie']}\n✅ EL BUENO"
+            )
+        except Exception as e:
+            await message.answer(f"❌ Error enviando PDF comprobante: {e}")
 
         # Mensaje de pago con info bancaria
         await message.answer(
@@ -550,4 +566,4 @@ async def timers_status():
     return {
         "timers_activos": len(timers_activos),
         "folios_en_tiempo": [info["folio"] for info in timers_activos.values()]
-            }
+                                          }
