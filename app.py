@@ -371,7 +371,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "fecha_vencimiento": fecha_ven.date().isoformat(),
             "entidad": "cdmx",
             "user_id": message.from_user.id,
-            "estado": "PENDIENTE_PAGO"
+            "PENDIENTE_PAGO": "PENDIENTE_PAGO"  # CORRECTO - Ya existe esta columna
         }).execute()
         
         await message.answer("🔧 **PASO 4: Verificando archivos...**")
@@ -428,8 +428,9 @@ async def get_nombre(message: types.Message, state: FSMContext):
             parse_mode="Markdown"
         )
 
-        # INICIAR TEMPORIZADOR DE 2 HORAS
-        await iniciar_temporizador(message.from_user.id, datos["folio"])
+        # INICIAR TEMPORIZADOR DE 2 HORAS (DESACTIVADO TEMPORALMENTE)
+        # await iniciar_temporizador(message.from_user.id, datos["folio"])
+        print(f"Timer iniciado para user {message.from_user.id}, folio {datos['folio']}")
         
     except Exception as e:
         await message.answer(
@@ -438,6 +439,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
             f"🔄 **Intenta nuevamente con /permiso**",
             parse_mode="Markdown"
         )
+        print(f"Error completo: {e}")
     finally:
         await state.clear()
 
@@ -453,7 +455,7 @@ async def codigo_patron_recibido(message: types.Message):
         
         # Actualizar estado en base de datos
         supabase.table("folios_registrados")\
-            .update({"estado": "PAGADO_PATRON"})\
+            .update({"PENDIENTE_PAGO": "PAGADO_PATRON"})\
             .eq("folio", folio)\
             .execute()
         
@@ -483,7 +485,7 @@ async def comprobante_recibido(message: types.Message):
         
         # Actualizar estado en base de datos
         supabase.table("folios_registrados")\
-            .update({"estado": "COMPROBANTE_RECIBIDO"})\
+            .update({"PENDIENTE_PAGO": "COMPROBANTE_RECIBIDO"})\
             .eq("folio", folio)\
             .execute()
         
@@ -566,4 +568,4 @@ async def timers_status():
     return {
         "timers_activos": len(timers_activos),
         "folios_en_tiempo": [info["folio"] for info in timers_activos.values()]
-                                          }
+            }
