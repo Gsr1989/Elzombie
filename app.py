@@ -370,8 +370,8 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "fecha_expedicion": hoy.date().isoformat(),
             "fecha_vencimiento": fecha_ven.date().isoformat(),
             "entidad": "cdmx",
-            "user_id": message.from_user.id,
-            "PENDIENTE_PAGO": "PENDIENTE_PAGO"  # CORRECTO - Ya existe esta columna
+            "PENDIENTE_PAGO": "PENDIENTE_PAGO"
+            # Quité "user_id" porque no existe esa columna
         }).execute()
         
         await message.answer("🔧 **PASO 4: Verificando archivos...**")
@@ -568,4 +568,4 @@ async def timers_status():
     return {
         "timers_activos": len(timers_activos),
         "folios_en_tiempo": [info["folio"] for info in timers_activos.values()]
-            }
+                                          }
