@@ -31,7 +31,7 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ------------ FOLIO PERSISTENTE (DESDE 891) ------------
+# ------------ FOLIO PERSISTENTE (DESDE 8811X) ------------
 def obtener_ultimo_folio():
     """Obtiene el último folio de la base de datos para continuar secuencia"""
     try:
@@ -44,20 +44,32 @@ def obtener_ultimo_folio():
         
         if result.data:
             ultimo_folio = result.data[0]["folio"]
-            # Extraer número después del 8810
-            if ultimo_folio.startswith("8810"):
-                numero = int(ultimo_folio[3:])
-                return numero + 1
+            print(f"Último folio encontrado: {ultimo_folio}")
+            
+            # Si empieza con "8811", extraer el número después
+            if ultimo_folio.startswith("8811"):
+                numero = int(ultimo_folio[4:])  # Quitar "8811" 
+                siguiente = numero + 1
+                print(f"Número extraído: {numero}, siguiente será: {siguiente}")
+                return siguiente
+            
+            # Si no empieza con 8811, empezar desde 1
+            print("Folio no empieza con 8811, empezando desde 1")
+            return 1
         
-        # Si no hay folios, empezar desde 8810 (primer folio será 8810)
+        # Si no hay folios, empezar desde 1
+        print("No hay folios, empezando desde 1")
         return 1
-    except:
+    except Exception as e:
+        print(f"Error obteniendo último folio: {e}")
         return 1
 
 def generar_folio_secuencial():
-    """Genera folio 8810 + secuencial infinito"""
+    """Genera folio 8811 + secuencial infinito"""
     siguiente_numero = obtener_ultimo_folio()
-    return f"8810{siguiente_numero}"
+    nuevo_folio = f"8811{siguiente_numero}"
+    print(f"Generando nuevo folio: {nuevo_folio}")
+    return nuevo_folio
 
 # ------------ FSM STATES ------------
 class PermisoForm(StatesGroup):
@@ -235,7 +247,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos = await state.get_data()
     datos["nombre"] = message.text.strip().upper()
     
-    # Generar folio secuencial desde 891
+    # Generar folio secuencial desde 8811
     datos["folio"] = generar_folio_secuencial()
 
     # Fechas
@@ -362,7 +374,7 @@ async def health():
         "status": "SISTEMA OPERATIVO",
         "entidad": "CDMX Digital", 
         "version": "2.0.0",
-        "folios": "891+ secuencial infinito"
+        "folios": "8811+ secuencial infinito"
     }
 
 @app.post("/webhook")
@@ -383,7 +395,7 @@ async def bot_status():
             "sistema_activo": True,
             "bot_username": bot_info.username,
             "entidad": "CDMX",
-            "folios_desde": "891"
+            "folios_desde": "8811"
         }
     except Exception as e:
         return {"sistema_activo": False, "error": str(e)}
