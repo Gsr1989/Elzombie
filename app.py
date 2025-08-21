@@ -21,9 +21,6 @@ OUTPUT_DIR = "documentos"
 PLANTILLA_PDF = "cdmxdigital2025ppp.pdf"
 PLANTILLA_BUENO = "elbueno.pdf"
 
-# CÓDIGO SECRETO DEL PATRÓN
-CODIGO_PATRON = "GSR89ROJAS"
-
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ------------ SUPABASE ------------
@@ -33,9 +30,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-
-# ------------ CONTROL DE TEMPORIZADORES ------------
-timers_activos = {}  # {user_id: {"folio": "xxx", "task": task_object}}
 
 # ------------ FOLIO PERSISTENTE (DESDE 891) ------------
 def obtener_ultimo_folio():
@@ -50,9 +44,12 @@ def obtener_ultimo_folio():
         
         if result.data:
             ultimo_folio = result.data[0]["folio"]
+            # Extraer número después del 891
             if ultimo_folio.startswith("891"):
                 numero = int(ultimo_folio[3:])
                 return numero + 1
+        
+        # Si no hay folios, empezar desde 891 (primer folio será 8911)
         return 1
     except:
         return 1
@@ -72,113 +69,21 @@ class PermisoForm(StatesGroup):
     motor = State()
     nombre = State()
 
-# ------------ FUNCIONES DE TEMPORIZADOR ------------
-async def enviar_recordatorio(user_id: int, folio: str, minutos_restantes: int):
-    """Envía recordatorio de tiempo restante"""
-    try:
-        await bot.send_message(
-            user_id,
-            f"⏰ **RECORDATORIO AUTOMÁTICO**\n\n"
-            f"🚨 **Te quedan {minutos_restantes} minutos para realizar el pago del folio {folio}**\n\n"
-            f"💰 **OPCIONES DE PAGO:**\n\n"
-            f"🏦 **TRANSFERENCIA BANCARIA**\n"
-            f"📍 BANCO AZTECA\n"
-            f"👤 LIZBETH LAZCANO MOSCO\n"
-            f"🔢 127180013037579543\n\n"
-            f"⚠️ **SOLO CAJA OXXO** ⚠️ 👇\n"
-            f"🔢 2242 1701 8038 5581\n"
-            f"💳 DEPOSITO EN CAJA OXXO TARJETA SPIN\n"
-            f"👤 LIZBETH LAZCANO MOSCO\n\n"
-            f"📸 **Envía tu comprobante después del pago**",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        print(f"Error enviando recordatorio: {e}")
-
-async def eliminar_folio_vencido(user_id: int, folio: str):
-    """Elimina folio de la base de datos al vencerse el tiempo"""
-    try:
-        # Eliminar de Supabase
-        supabase.table("folios_registrados").delete().eq("folio", folio).execute()
-        
-        # Enviar mensaje de eliminación
-        await bot.send_message(
-            user_id,
-            f"🚫 **TIEMPO AGOTADO - FOLIO ELIMINADO** 🚫\n\n"
-            f"❌ **El folio {folio} ha sido dado de baja automáticamente**\n\n"
-            f"🔴 **Tu número de serie ha sido vetado del sistema**\n\n"
-            f"⛔ **No podrás realizar más trámites con este vehículo**\n\n"
-            f"📍 **El folio ya no aparecerá en consultas oficiales**\n\n"
-            f"🔄 **Para generar un nuevo permiso usa /permiso**",
-            parse_mode="Markdown"
-        )
-        
-        # Limpiar timer del diccionario
-        if user_id in timers_activos:
-            del timers_activos[user_id]
-            
-    except Exception as e:
-        print(f"Error eliminando folio vencido: {e}")
-
-async def iniciar_temporizador(user_id: int, folio: str):
-    """Inicia el temporizador de 2 horas con recordatorios cada 30 min"""
-    
-    async def temporizador():
-        try:
-            # Recordatorio a los 30 minutos (quedan 90)
-            await asyncio.sleep(30 * 60)
-            if user_id in timers_activos:
-                await enviar_recordatorio(user_id, folio, 90)
-            
-            # Recordatorio a los 60 minutos (quedan 60)
-            await asyncio.sleep(30 * 60)
-            if user_id in timers_activos:
-                await enviar_recordatorio(user_id, folio, 60)
-            
-            # Recordatorio a los 90 minutos (quedan 30)
-            await asyncio.sleep(30 * 60)
-            if user_id in timers_activos:
-                await enviar_recordatorio(user_id, folio, 30)
-            
-            # Último recordatorio a los 110 minutos (quedan 10)
-            await asyncio.sleep(20 * 60)
-            if user_id in timers_activos:
-                await enviar_recordatorio(user_id, folio, 10)
-            
-            # Eliminación final a las 2 horas
-            await asyncio.sleep(10 * 60)
-            if user_id in timers_activos:
-                await eliminar_folio_vencido(user_id, folio)
-                
-        except asyncio.CancelledError:
-            print(f"Timer cancelado para user {user_id}, folio {folio}")
-        except Exception as e:
-            print(f"Error en temporizador: {e}")
-    
-    # Crear y guardar la tarea
-    task = asyncio.create_task(temporizador())
-    timers_activos[user_id] = {"folio": folio, "task": task}
-
-def cancelar_temporizador(user_id: int):
-    """Cancela el temporizador activo para un usuario"""
-    if user_id in timers_activos:
-        timers_activos[user_id]["task"].cancel()
-        del timers_activos[user_id]
-
 # ------------ PDF ------------
 def generar_pdf_principal(datos: dict) -> str:
     doc = fitz.open(PLANTILLA_PDF)
     page = doc[0]
 
+    # TODOS LOS DATOS EN MAYÚSCULAS EN EL PDF
     page.insert_text((87, 130), datos["folio"], fontsize=14, color=(1, 0, 0))
     page.insert_text((130, 145), datos["fecha"], fontsize=12, color=(0, 0, 0))
-    page.insert_text((87, 290), datos["marca"].upper(), fontsize=11, color=(0, 0, 0))
-    page.insert_text((375, 290), datos["serie"].upper(), fontsize=11, color=(0, 0, 0))
-    page.insert_text((87, 307), datos["linea"].upper(), fontsize=11, color=(0, 0, 0))
-    page.insert_text((375, 307), datos["motor"].upper(), fontsize=11, color=(0, 0, 0))
+    page.insert_text((87, 290), datos["marca"].upper(), fontsize=11, color=(0, 0, 0))         # MAYÚS
+    page.insert_text((375, 290), datos["serie"].upper(), fontsize=11, color=(0, 0, 0))        # MAYÚS
+    page.insert_text((87, 307), datos["linea"].upper(), fontsize=11, color=(0, 0, 0))         # MAYÚS
+    page.insert_text((375, 307), datos["motor"].upper(), fontsize=11, color=(0, 0, 0))        # MAYÚS
     page.insert_text((87, 323), datos["anio"], fontsize=11, color=(0, 0, 0))
     page.insert_text((375, 323), datos["vigencia"], fontsize=11, color=(0, 0, 0))
-    page.insert_text((375, 340), datos["nombre"].upper(), fontsize=10, color=(0, 0, 0))
+    page.insert_text((375, 340), datos["nombre"].upper(), fontsize=10, color=(0, 0, 0))       # MAYÚS
 
     filename = f"{OUTPUT_DIR}/{datos['folio']}_principal.pdf"
     doc.save(filename)
@@ -187,7 +92,7 @@ def generar_pdf_principal(datos: dict) -> str:
 def generar_pdf_bueno(serie: str, fecha: datetime, folio: str) -> str:
     doc = fitz.open(PLANTILLA_BUENO)
     page = doc[0]
-    page.insert_text((135.02, 193.88), serie.upper(), fontsize=6)
+    page.insert_text((135.02, 193.88), serie.upper(), fontsize=6)  # SERIE EN MAYÚS
     page.insert_text((190, 324), fecha.strftime("%d/%m/%Y"), fontsize=6)
     filename = f"{OUTPUT_DIR}/{folio}_bueno.pdf"
     doc.save(filename)
@@ -210,6 +115,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
 
 @dp.message(Command("permiso"))
 async def permiso_cmd(message: types.Message, state: FSMContext):
+    # Crear botones de aceptación
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ ACEPTO Y CONTINÚO", callback_data="acepto_condiciones"),
@@ -328,9 +234,11 @@ async def get_motor(message: types.Message, state: FSMContext):
 async def get_nombre(message: types.Message, state: FSMContext):
     datos = await state.get_data()
     datos["nombre"] = message.text.strip().upper()
+    
+    # Generar folio secuencial desde 891
     datos["folio"] = generar_folio_secuencial()
-    datos["user_id"] = message.from_user.id
 
+    # Fechas
     hoy = datetime.now()
     meses = {
         1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
@@ -349,14 +257,9 @@ async def get_nombre(message: types.Message, state: FSMContext):
     )
 
     try:
-        await message.answer("🔧 **PASO 1: Generando PDF principal...**")
-        
         # Generar PDFs
         p1 = generar_pdf_principal(datos)
-        await message.answer("🔧 **PASO 2: Generando PDF comprobante...**")
-        
         p2 = generar_pdf_bueno(datos["serie"], hoy, datos["folio"])
-        await message.answer("🔧 **PASO 3: Guardando en base de datos...**")
 
         # Guardar en base de datos
         supabase.table("folios_registrados").insert({
@@ -370,40 +273,22 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "fecha_expedicion": hoy.date().isoformat(),
             "fecha_vencimiento": fecha_ven.date().isoformat(),
             "entidad": "cdmx",
-            "PENDIENTE_PAGO": "PENDIENTE_PAGO"
-            # Quité "user_id" porque no existe esa columna
         }).execute()
-        
-        await message.answer("🔧 **PASO 4: Verificando archivos...**")
-        
-        # Verificar que los archivos existen
-        if not os.path.exists(p1):
-            await message.answer(f"❌ Error: No se generó {p1}")
-            return
-        if not os.path.exists(p2):
-            await message.answer(f"❌ Error: No se generó {p2}")
-            return
-            
-        await message.answer("🔧 **PASO 5: Enviando documentos...**")
 
         # Enviar documentos
-        try:
-            await message.answer_document(
-                FSInputFile(p1),
-                caption=f"📄 PERMISO PRINCIPAL OFICIAL\n🆔 Folio: {datos['folio']}\n🏛️ CDMX Digital"
-            )
-        except Exception as e:
-            await message.answer(f"❌ Error enviando PDF principal: {e}")
-            
-        try:
-            await message.answer_document(
-                FSInputFile(p2),
-                caption=f"📋 COMPROBANTE DE TRÁMITE\n🔢 Serie: {datos['serie']}\n✅ EL BUENO"
-            )
-        except Exception as e:
-            await message.answer(f"❌ Error enviando PDF comprobante: {e}")
+        await message.answer_document(
+            FSInputFile(p1),
+            caption=f"📄 **PERMISO PRINCIPAL OFICIAL**\n🆔 **Folio:** {datos['folio']}\n🏛️ **CDMX Digital**"
+        )
+        
+        await message.answer_document(
+            FSInputFile(p2),
+            caption=f"📋 **COMPROBANTE DE TRÁMITE**\n🔢 **Serie:** {datos['serie']}\n✅ **EL BUENO**"
+        )
 
-        # Mensaje de pago con info bancaria
+        # Mensaje final amenazante pero "profesional"
+        tiempo_limite = (hoy + timedelta(hours=2)).strftime("%H:%M hrs")
+        
         await message.answer(
             f"🎉 **DOCUMENTOS GENERADOS EXITOSAMENTE** 🎉\n\n"
             f"📋 **RESUMEN DEL TRÁMITE:**\n"
@@ -411,26 +296,18 @@ async def get_nombre(message: types.Message, state: FSMContext):
             f"🚗 **Vehículo:** {datos['marca']} {datos['linea']} {datos['anio']}\n"
             f"🔢 **Serie:** {datos['serie']}\n"
             f"👤 **Solicitante:** {datos['nombre']}\n\n"
-            f"💰 **INFORMACIÓN DE PAGO:**\n\n"
-            f"🏦 **TRANSFERENCIA BANCARIA**\n"
-            f"📍 BANCO AZTECA\n"
-            f"👤 LIZBETH LAZCANO MOSCO\n"
-            f"🔢 127180013037579543\n\n"
-            f"⚠️ **SOLO CAJA OXXO** ⚠️ 👇\n"
-            f"🔢 2242 1701 8038 5581\n"
-            f"💳 DEPOSITO EN CAJA OXXO TARJETA SPIN\n"
-            f"👤 LIZBETH LAZCANO MOSCO\n\n"
-            f"⏰ **TIENES 2 HORAS PARA PAGAR**\n\n"
-            f"📸 **Envía tu comprobante de pago para validación**\n\n"
-            f"🚨 **RECORDATORIO:**\n"
-            f"🔴 **Sin pago en 2 horas = Folio eliminado automáticamente**\n"
-            f"🔴 **Serie vetada permanentemente del sistema**",
+            f"⏰ **TIEMPO LÍMITE DE PAGO:** {tiempo_limite}\n\n"
+            f"🚨 **INSTRUCCIONES IMPORTANTES:**\n\n"
+            f"💰 **1.** Realiza el pago correspondiente\n"
+            f"📸 **2.** Envía la captura del comprobante de pago\n"
+            f"✅ **3.** Espera la validación del sistema\n\n"
+            f"⚠️ **RECORDATORIO:**\n"
+            f"🔴 **Tienes 2 horas para completar el pago**\n"
+            f"🔴 **De lo contrario el folio {datos['folio']} será dado de baja**\n"
+            f"🔴 **La serie {datos['serie']} quedará vetada permanentemente**\n\n"
+            f"📞 **El sistema está monitoreando tu trámite**",
             parse_mode="Markdown"
         )
-
-        # INICIAR TEMPORIZADOR DE 2 HORAS (DESACTIVADO TEMPORALMENTE)
-        # await iniciar_temporizador(message.from_user.id, datos["folio"])
-        print(f"Timer iniciado para user {message.from_user.id}, folio {datos['folio']}")
         
     except Exception as e:
         await message.answer(
@@ -439,71 +316,8 @@ async def get_nombre(message: types.Message, state: FSMContext):
             f"🔄 **Intenta nuevamente con /permiso**",
             parse_mode="Markdown"
         )
-        print(f"Error completo: {e}")
     finally:
         await state.clear()
-
-# ------------ HANDLERS DE PAGO ------------
-@dp.message(lambda message: message.text and message.text.strip() == CODIGO_PATRON)
-async def codigo_patron_recibido(message: types.Message):
-    """Maneja el código secreto del patrón"""
-    user_id = message.from_user.id
-    
-    if user_id in timers_activos:
-        folio = timers_activos[user_id]["folio"]
-        cancelar_temporizador(user_id)
-        
-        # Actualizar estado en base de datos
-        supabase.table("folios_registrados")\
-            .update({"PENDIENTE_PAGO": "PAGADO_PATRON"})\
-            .eq("folio", folio)\
-            .execute()
-        
-        await message.answer(
-            f"👑 **CÓDIGO DE PATRÓN CONFIRMADO** 👑\n\n"
-            f"✅ **Folio {folio} marcado como PAGADO**\n\n"
-            f"⏹️ **Temporizador detenido**\n\n"
-            f"🔒 **Permiso asegurado permanentemente**",
-            parse_mode="Markdown"
-        )
-    else:
-        await message.answer(
-            "👑 **CÓDIGO DE PATRÓN VÁLIDO**\n\n"
-            "❌ **No hay temporizador activo**\n\n"
-            "📝 **Genera un permiso primero con /permiso**",
-            parse_mode="Markdown"
-        )
-
-@dp.message(lambda message: message.photo or message.document)
-async def comprobante_recibido(message: types.Message):
-    """Maneja las imágenes/comprobantes de pago"""
-    user_id = message.from_user.id
-    
-    if user_id in timers_activos:
-        folio = timers_activos[user_id]["folio"]
-        cancelar_temporizador(user_id)
-        
-        # Actualizar estado en base de datos
-        supabase.table("folios_registrados")\
-            .update({"PENDIENTE_PAGO": "COMPROBANTE_RECIBIDO"})\
-            .eq("folio", folio)\
-            .execute()
-        
-        await message.answer(
-            f"📸 **COMPROBANTE RECIBIDO** 📸\n\n"
-            f"✅ **Folio:** {folio}\n\n"
-            f"⏳ **El pago será validado por el sistema**\n\n"
-            f"🔒 **Tu permiso está asegurado**\n\n"
-            f"✅ **Excelente día**",
-            parse_mode="Markdown"
-        )
-    else:
-        await message.answer(
-            "📸 **Imagen recibida**\n\n"
-            "❌ **No hay trámite activo**\n\n"
-            "📝 **Genera un permiso primero con /permiso**",
-            parse_mode="Markdown"
-        )
 
 @dp.message()
 async def fallback(message: types.Message):
@@ -540,16 +354,15 @@ async def lifespan(app: FastAPI):
             await _keep_task
     await bot.session.close()
 
-app = FastAPI(lifespan=lifespan, title="Sistema CDMX con Pagos", version="3.0.0")
+app = FastAPI(lifespan=lifespan, title="Sistema CDMX Automatizado", version="2.0.0")
 
 @app.get("/")
 async def health():
     return {
         "status": "SISTEMA OPERATIVO",
         "entidad": "CDMX Digital", 
-        "version": "3.0.0",
-        "folios": "891+ secuencial infinito",
-        "temporizador": "2 horas con auto-eliminación"
+        "version": "2.0.0",
+        "folios": "891+ secuencial infinito"
     }
 
 @app.post("/webhook")
@@ -562,10 +375,15 @@ async def telegram_webhook(request: Request):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-@app.get("/timers")
-async def timers_status():
-    """Endpoint para ver timers activos (debug)"""
-    return {
-        "timers_activos": len(timers_activos),
-        "folios_en_tiempo": [info["folio"] for info in timers_activos.values()]
-                                          }
+@app.get("/status")
+async def bot_status():
+    try:
+        bot_info = await bot.get_me()
+        return {
+            "sistema_activo": True,
+            "bot_username": bot_info.username,
+            "entidad": "CDMX",
+            "folios_desde": "891"
+        }
+    except Exception as e:
+        return {"sistema_activo": False, "error": str(e)}
