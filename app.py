@@ -349,9 +349,14 @@ async def get_nombre(message: types.Message, state: FSMContext):
     )
 
     try:
+        await message.answer("🔧 **PASO 1: Generando PDF principal...**")
+        
         # Generar PDFs
         p1 = generar_pdf_principal(datos)
+        await message.answer("🔧 **PASO 2: Generando PDF comprobante...**")
+        
         p2 = generar_pdf_bueno(datos["serie"], hoy, datos["folio"])
+        await message.answer("🔧 **PASO 3: Guardando en base de datos...**")
 
         # Guardar en base de datos
         supabase.table("folios_registrados").insert({
@@ -368,6 +373,8 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "user_id": message.from_user.id,
             "estado": "PENDIENTE_PAGO"
         }).execute()
+        
+        await message.answer("🔧 **PASO 4: Enviando documentos...**")
 
         # Enviar documentos
         await message.answer_document(
@@ -543,4 +550,4 @@ async def timers_status():
     return {
         "timers_activos": len(timers_activos),
         "folios_en_tiempo": [info["folio"] for info in timers_activos.values()]
-        }
+            }
