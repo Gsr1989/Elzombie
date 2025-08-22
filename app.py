@@ -75,51 +75,93 @@ def generar_pdf_bueno(serie: str, fecha: datetime, folio: str) -> str:
     doc.save(filename)
     return filename
 
-# ------------ HANDLERS ------------
+# ------------ HANDLERS CON DIÁLOGOS CHINGONES ------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("👋 Bienvenido. Usa /permiso para iniciar")
+    await message.answer(
+        "🔥 ¡Órale! Aquí está el Sistema Digital de Permisos CDMX.\n"
+        "Somos eficientes, directos y no andamos con mamadas.\n\n"
+        "Usa /permiso para tramitar tu documento. Punto."
+    )
 
 @dp.message(Command("permiso"))
 async def permiso_cmd(message: types.Message, state: FSMContext):
-    await message.answer("Marca del vehículo:")
+    await message.answer(
+        "🚗 Vamos a trabajar en serio.\n"
+        "Escribe la MARCA del vehículo y que sea claro:"
+    )
     await state.set_state(PermisoForm.marca)
 
 @dp.message(PermisoForm.marca)
 async def get_marca(message: types.Message, state: FSMContext):
-    await state.update_data(marca=message.text.strip())
-    await message.answer("Línea:")
+    marca = message.text.strip().upper()
+    await state.update_data(marca=marca)
+    await message.answer(
+        f"✅ MARCA: {marca} - Registrado.\n\n"
+        "Ahora la LÍNEA del vehículo. Sin rollos:"
+    )
     await state.set_state(PermisoForm.linea)
 
 @dp.message(PermisoForm.linea)
 async def get_linea(message: types.Message, state: FSMContext):
-    await state.update_data(linea=message.text.strip())
-    await message.answer("Año:")
+    linea = message.text.strip().upper()
+    await state.update_data(linea=linea)
+    await message.answer(
+        f"✅ LÍNEA: {linea} - Anotado.\n\n"
+        "El AÑO del vehículo (números, no letras):"
+    )
     await state.set_state(PermisoForm.anio)
 
 @dp.message(PermisoForm.anio)
 async def get_anio(message: types.Message, state: FSMContext):
-    await state.update_data(anio=message.text.strip())
-    await message.answer("Serie:")
+    anio = message.text.strip()
+    if not anio.isdigit() or len(anio) != 4:
+        await message.answer(
+            "⚠️ Ahí no, jefe. El año debe ser de 4 dígitos.\n"
+            "Ejemplo: 2020, 2015, etc. Inténtelo de nuevo:"
+        )
+        return
+    
+    await state.update_data(anio=anio)
+    await message.answer(
+        f"✅ AÑO: {anio} - Confirmado.\n\n"
+        "NÚMERO DE SERIE del vehículo:"
+    )
     await state.set_state(PermisoForm.serie)
 
 @dp.message(PermisoForm.serie)
 async def get_serie(message: types.Message, state: FSMContext):
-    await state.update_data(serie=message.text.strip())
-    await message.answer("Motor:")
+    serie = message.text.strip().upper()
+    if len(serie) < 5:
+        await message.answer(
+            "⚠️ Ese número de serie está muy corto.\n"
+            "Revise bien y escriba el número completo:"
+        )
+        return
+        
+    await state.update_data(serie=serie)
+    await message.answer(
+        f"✅ SERIE: {serie} - En el sistema.\n\n"
+        "NÚMERO DE MOTOR:"
+    )
     await state.set_state(PermisoForm.motor)
 
 @dp.message(PermisoForm.motor)
 async def get_motor(message: types.Message, state: FSMContext):
-    await state.update_data(motor=message.text.strip())
-    await message.answer("Nombre del solicitante:")
+    motor = message.text.strip().upper()
+    await state.update_data(motor=motor)
+    await message.answer(
+        f"✅ MOTOR: {motor} - Capturado.\n\n"
+        "Por último, el NOMBRE COMPLETO del solicitante:"
+    )
     await state.set_state(PermisoForm.nombre)
 
 @dp.message(PermisoForm.nombre)
 async def get_nombre(message: types.Message, state: FSMContext):
     datos = await state.get_data()
-    datos["nombre"] = message.text.strip()
+    nombre = message.text.strip().upper()
+    datos["nombre"] = nombre
     datos["folio"] = nuevo_folio()
 
     # -------- FECHAS FORMATOS --------
@@ -134,19 +176,27 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos["vigencia"] = fecha_ven.strftime("%d/%m/%Y")
     # ---------------------------------
 
+    await message.answer(
+        f"🔄 PROCESANDO PERMISO...\n"
+        f"Folio: {datos['folio']}\n"
+        f"Titular: {nombre}\n\n"
+        "El sistema está trabajando. Espere..."
+    )
+
     try:
         p1 = generar_pdf_principal(datos)
         p2 = generar_pdf_bueno(datos["serie"], hoy, datos["folio"])
 
         await message.answer_document(
             FSInputFile(p1),
-            caption=f"📄 Principal - Folio: {datos['folio']}"
+            caption=f"📋 PERMISO PRINCIPAL\nFolio: {datos['folio']}\n⚡ Sistema CDMX Digital"
         )
         await message.answer_document(
             FSInputFile(p2),
-            caption=f"✅ EL BUENO - Serie: {datos['serie']}"
+            caption=f"🏆 DOCUMENTO VERIFICADO\nSerie: {datos['serie']}\n✅ Validación oficial"
         )
 
+        # Guardar en base de datos
         supabase.table("folios_registrados").insert({
             "folio": datos["folio"],
             "marca": datos["marca"],
@@ -160,15 +210,35 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "entidad": "cdmx",
         }).execute()
 
-        await message.answer("✅ Permiso guardado y registrado correctamente.")
+        await message.answer(
+            f"🎯 MISIÓN CUMPLIDA\n\n"
+            f"Permiso generado con folio {datos['folio']}\n"
+            f"Vigencia: 30 días\n"
+            f"Estado: ACTIVO\n\n"
+            "Sus documentos están listos. El sistema no falla.\n"
+            "Para otro trámite, use /permiso nuevamente."
+        )
+        
     except Exception as e:
-        await message.answer(f"❌ Error al generar: {e}")
+        await message.answer(
+            f"💥 ERROR EN EL SISTEMA\n\n"
+            f"Algo se jodió: {str(e)}\n\n"
+            "Intente nuevamente con /permiso\n"
+            "Si persiste, contacte al administrador."
+        )
     finally:
         await state.clear()
 
 @dp.message()
 async def fallback(message: types.Message):
-    await message.answer("Usa /permiso para iniciar.")
+    respuestas_random = [
+        "🤖 No entiendo esa orden, soldado. Use /permiso para tramitar.",
+        "⚡ Sistema no reconoce esa instrucción. /permiso es lo que necesita.",
+        "🎯 Directo al grano: /permiso para iniciar su trámite.",
+        "🔥 Aquí no hay tiempo que perder. /permiso y listo.",
+    ]
+    import random
+    await message.answer(random.choice(respuestas_random))
 
 # ------------ FASTAPI + LIFESPAN ------------
 _keep_task = None
