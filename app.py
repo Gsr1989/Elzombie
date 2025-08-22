@@ -34,8 +34,8 @@ dp = Dispatcher(storage=storage)
 # ------------ FOLIO ------------
 folio_counter = {"count": 1}
 def nuevo_folio() -> str:
-    folio = f"01{folio_counter['count']}"
-    folio_counter["count"] += 1
+    folio = f"234{folio_counter['count']}"
+    folio_counter["count"] += 2
     return folio
 
 # ------------ FSM STATES ------------
