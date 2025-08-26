@@ -27,7 +27,7 @@ PLANTILLA_PDF = "cdmxdigital2025ppp.pdf"
 PLANTILLA_BUENO = "elbueno.pdf"
 
 # Precio del permiso
-PRECIO_PERMISO = 150
+PRECIO_PERMISO = 200
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -121,13 +121,13 @@ def cancelar_timer(user_id: int):
         del timers_activos[user_id]
 
 # ------------ FOLIO CDMX CON PREFIJO 234 PROGRESIVO ------------
-FOLIO_PREFIJO = "234"
+FOLIO_PREFIJO = "822"
 folio_counter = {"siguiente": 1}
 
 def obtener_siguiente_folio():
     """
-    Retorna el folio como string con prefijo 234 y número progresivo.
-    Ej: 2341, 2342, ..., 234100, etc.
+    Retorna el folio como string con prefijo 822 y número progresivo.
+    Ej: 8221, 8222, ..., 822100, etc.
     """
     folio_num = folio_counter["siguiente"]
     folio = f"{FOLIO_PREFIJO}{folio_num}"
@@ -166,7 +166,6 @@ class PermisoForm(StatesGroup):
     anio = State()
     serie = State()
     motor = State()
-    color = State()
     nombre = State()
 
 # ------------ GENERACIÓN PDF CDMX ------------
