@@ -531,7 +531,7 @@ async def recibir_comprobante(message: types.Message):
     await message.answer(
         f"✅ COMPROBANTE RECIBIDO CORRECTAMENTE\n\n"
         f"📄 Folio: {folio}\n"
-        f"📸 Imagen procesada y almacenada\n"
+        f"📸 Gracias por la imagen, este comprobante será revisado por un 2do filtro\n"
         f"⏰ Timer de pago detenido\n\n"
         f"🔍 Su comprobante está siendo verificado por nuestro equipo.\n"
         f"Una vez validado el pago, su permiso quedará completamente activo.\n\n"
