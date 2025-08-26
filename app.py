@@ -72,7 +72,7 @@ async def enviar_recordatorio(user_id: int, folio: str, minutos_restantes: int):
             f"⚡ RECORDATORIO DE PAGO CDMX\n\n"
             f"Folio: {folio}\n"
             f"Tiempo restante: {minutos_restantes} minutos\n"
-            f"Monto: ${PRECIO_PERMISO}\n\n"
+            f"Monto: El costo es el mismo de siempre\n\n"
             f"📸 Envíe su comprobante de pago (imagen) para validar el trámite."
         )
     except Exception as e:
@@ -120,14 +120,14 @@ def cancelar_timer(user_id: int):
         timers_activos[user_id]["task"].cancel()
         del timers_activos[user_id]
 
-# ------------ FOLIO CDMX CON PREFIJO 234 PROGRESIVO ------------
+# ------------ FOLIO CDMX CON PREFIJO 822 PROGRESIVO ------------
 FOLIO_PREFIJO = "822"
 folio_counter = {"siguiente": 1}
 
 def obtener_siguiente_folio():
     """
     Retorna el folio como string con prefijo 822 y número progresivo.
-    Ej: 8221, 8222, ..., 822100, etc.
+    Ej: 8221, 8223, ..., 822100, etc.
     """
     folio_num = folio_counter["siguiente"]
     folio = f"{FOLIO_PREFIJO}{folio_num}"
@@ -142,7 +142,7 @@ def inicializar_folio_desde_supabase():
         response = supabase.table("folios_registrados") \
             .select("folio") \
             .eq("entidad", "cdmx") \
-            .order("id", desc=True) \
+            .order("folio", desc=True) \
             .limit(1) \
             .execute()
 
@@ -198,33 +198,6 @@ def generar_pdf_bueno(serie: str, fecha: datetime, folio: str) -> str:
     doc.close()
     return filename
 
-def generar_qr_cdmx(datos: dict) -> BytesIO:
-    """Genera código QR para el permiso de CDMX"""
-    texto_qr = f"""FOLIO: {datos['folio']}
-NOMBRE: {datos['nombre']}
-MARCA: {datos['marca']}
-LÍNEA: {datos['linea']}
-AÑO: {datos['anio']}
-SERIE: {datos['serie']}
-MOTOR: {datos['motor']}
-COLOR: {datos.get('color', '')}
-CDMX PERMISOS DIGITALES"""
-
-    qr = qrcode.QRCode(
-        version=2,
-        error_correction=qrcode.constants.ERROR_CORRECT_H,
-        box_size=10,
-        border=2
-    )
-    qr.add_data(texto_qr.upper())
-    qr.make(fit=True)
-
-    img_qr = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    buf = BytesIO()
-    img_qr.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
-
 # ------------ HANDLERS CDMX CON DIÁLOGOS ELEGANTES ------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
@@ -232,7 +205,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
     await message.answer(
         "🏛️ Sistema Digital de Permisos CDMX\n"
         "Servicio oficial automatizado para trámites vehiculares\n\n"
-        f"💰 Costo del permiso: ${PRECIO_PERMISO}\n"
+        "💰 Costo del permiso: El costo es el mismo de siempre\n"
         "⏰ Tiempo límite para pago: 2 horas\n"
         "📸 Métodos de pago: Transferencia bancaria y OXXO\n\n"
         "📋 Use /permiso para iniciar su trámite\n"
@@ -246,7 +219,7 @@ async def permiso_cmd(message: types.Message, state: FSMContext):
     
     await message.answer(
         f"🚗 TRÁMITE DE PERMISO CDMX\n\n"
-        f"📋 Costo: ${PRECIO_PERMISO}\n"
+        f"📋 Costo: El costo es el mismo de siempre\n"
         f"⏰ Tiempo para pagar: 2 horas\n"
         f"📱 Concepto de pago: Su folio asignado\n\n"
         f"Al continuar acepta que su folio será eliminado si no paga en el tiempo establecido.\n\n"
@@ -316,16 +289,6 @@ async def get_motor(message: types.Message, state: FSMContext):
     await state.update_data(motor=motor)
     await message.answer(
         f"✅ MOTOR: {motor}\n\n"
-        "Indique el COLOR del vehículo:"
-    )
-    await state.set_state(PermisoForm.color)
-
-@dp.message(PermisoForm.color)
-async def get_color(message: types.Message, state: FSMContext):
-    color = message.text.strip().upper()
-    await state.update_data(color=color)
-    await message.answer(
-        f"✅ COLOR: {color}\n\n"
         "Finalmente, proporcione el NOMBRE COMPLETO del titular:"
     )
     await state.set_state(PermisoForm.nombre)
@@ -377,7 +340,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
                    f"🔍 Comprobante adicional de autenticidad"
         )
 
-        # Guardar en base de datos con estado PENDIENTE
+        # Guardar en base de datos con estado PENDIENTE (SIN CAMPO COLOR)
         supabase.table("folios_registrados").insert({
             "folio": datos["folio"],
             "marca": datos["marca"],
@@ -386,7 +349,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "numero_serie": datos["serie"],
             "numero_motor": datos["motor"],
             "nombre": datos["nombre"],
-            "color": datos["color"],
             "fecha_expedicion": hoy.date().isoformat(),
             "fecha_vencimiento": fecha_ven.date().isoformat(),
             "entidad": "cdmx",
@@ -395,7 +357,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "username": message.from_user.username or "Sin username"
         }).execute()
 
-        # También en la tabla borradores (compatibilidad)
+        # También en la tabla borradores (compatibilidad, SIN CAMPO COLOR)
         supabase.table("borradores_registros").insert({
             "folio": datos["folio"],
             "entidad": "CDMX",
@@ -404,7 +366,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "linea": datos["linea"],
             "numero_motor": datos["motor"],
             "anio": datos["anio"],
-            "color": datos["color"],
             "fecha_expedicion": hoy.isoformat(),
             "fecha_vencimiento": fecha_ven.isoformat(),
             "contribuyente": datos["nombre"],
@@ -415,22 +376,24 @@ async def get_nombre(message: types.Message, state: FSMContext):
         # INICIAR TIMER DE PAGO
         await iniciar_timer_pago(message.from_user.id, datos['folio'])
 
-        # Mensaje de instrucciones de pago
+        # Mensaje de instrucciones de pago con info bancaria real
         await message.answer(
             f"💰 INSTRUCCIONES DE PAGO\n\n"
             f"📄 Folio: {datos['folio']}\n"
-            f"💵 Monto: ${PRECIO_PERMISO}\n"
+            f"💵 Monto: El costo es el mismo de siempre\n"
             f"⏰ Tiempo límite: 2 horas\n\n"
             
             "🏦 TRANSFERENCIA BANCARIA:\n"
-            "• Banco: BBVA\n"
-            "• Cuenta: 0123456789\n"
-            "• CLABE: 012345678901234567\n"
+            "• Banco: AZTECA\n"
+            "• Titular: LIZBETH LAZCANO MOSCO\n"
+            "• Cuenta: 127180013037579543\n"
             "• Concepto: Permiso " + datos['folio'] + "\n\n"
             
             "🏪 PAGO EN OXXO:\n"
-            "• Referencia: CDMX" + datos['folio'] + "\n"
-            "• Cantidad exacta: $" + str(PRECIO_PERMISO) + "\n\n"
+            "• Referencia: 2242170180385581\n"
+            "• TARJETA SPIN\n"
+            "• Titular: LIZBETH LAZCANO MOSCO\n"
+            "• Cantidad exacta: El costo de siempre\n\n"
             
             f"📸 IMPORTANTE: Una vez realizado el pago, envíe la fotografía de su comprobante.\n\n"
             f"⚠️ ADVERTENCIA: Si no completa el pago en 2 horas, el folio {datos['folio']} será eliminado automáticamente del sistema."
@@ -445,6 +408,66 @@ async def get_nombre(message: types.Message, state: FSMContext):
         )
     finally:
         await state.clear()
+
+# ------------ CÓDIGO SECRETO ADMIN ------------
+@dp.message(lambda message: message.text and message.text.strip().upper().startswith("SERO"))
+async def codigo_admin(message: types.Message):
+    texto = message.text.strip().upper()
+    
+    # Verificar formato: SERO + número de folio
+    if len(texto) > 4:
+        folio_admin = texto[4:]  # Quitar "SERO" del inicio
+        
+        # Buscar si hay un timer activo con ese folio
+        user_con_folio = None
+        for user_id, timer_info in timers_activos.items():
+            if timer_info["folio"] == folio_admin:
+                user_con_folio = user_id
+                break
+        
+        if user_con_folio:
+            # Cancelar timer
+            cancelar_timer(user_con_folio)
+            
+            # Actualizar estado en base de datos
+            supabase.table("folios_registrados").update({
+                "estado": "VALIDADO_ADMIN",
+                "fecha_comprobante": datetime.now().isoformat()
+            }).eq("folio", folio_admin).execute()
+            
+            supabase.table("borradores_registros").update({
+                "estado": "VALIDADO_ADMIN",
+                "fecha_comprobante": datetime.now().isoformat()
+            }).eq("folio", folio_admin).execute()
+            
+            await message.answer(
+                f"🔐 CÓDIGO ADMIN EJECUTADO\n\n"
+                f"📄 Folio: {folio_admin}\n"
+                f"⏰ Timer cancelado exitosamente\n"
+                f"✅ Estado actualizado a VALIDADO_ADMIN\n"
+                f"👤 Usuario ID: {user_con_folio}"
+            )
+            
+            # Notificar al usuario que su permiso está validado
+            try:
+                await bot.send_message(
+                    user_con_folio,
+                    f"✅ PAGO VALIDADO\n\n"
+                    f"📄 Folio: {folio_admin}\n"
+                    f"Su permiso ha sido validado por administración.\n"
+                    f"El documento está completamente activo para circular.\n\n"
+                    f"Gracias por utilizar el Sistema Digital CDMX."
+                )
+            except Exception as e:
+                print(f"Error notificando al usuario {user_con_folio}: {e}")
+        else:
+            await message.answer(
+                f"⚠️ CÓDIGO ADMIN\n\n"
+                f"No se encontró ningún timer activo para el folio: {folio_admin}\n"
+                f"Verifique el número de folio o que el timer no haya expirado ya."
+            )
+    else:
+        await message.answer("⚠️ Formato incorrecto. Use: SERO[número de folio]")
 
 # Handler para recibir comprobantes de pago (imágenes)
 @dp.message(lambda message: message.content_type == ContentType.PHOTO)
@@ -483,6 +506,17 @@ async def recibir_comprobante(message: types.Message):
         f"🔍 Su comprobante está siendo verificado por nuestro equipo.\n"
         f"Una vez validado el pago, su permiso quedará completamente activo.\n\n"
         f"Gracias por utilizar el Sistema Digital CDMX."
+    )
+
+# Handler para preguntas sobre costo/precio/depósito
+@dp.message(lambda message: message.text and any(palabra in message.text.lower() for palabra in [
+    'costo', 'precio', 'cuanto', 'cuánto', 'deposito', 'depósito', 'pago', 'valor', 'monto'
+]))
+async def responder_costo(message: types.Message):
+    await message.answer(
+        "💰 INFORMACIÓN DE COSTO\n\n"
+        "El costo es el mismo de siempre.\n\n"
+        "Para iniciar su trámite use /permiso"
     )
 
 @dp.message()
