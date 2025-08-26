@@ -27,7 +27,7 @@ PLANTILLA_PDF = "cdmxdigital2025ppp.pdf"
 PLANTILLA_BUENO = "elbueno.pdf"
 
 # Precio del permiso
-PRECIO_PERMISO = 200
+PRECIO_PERMISO = EL MISMO DE SIEMPRE 
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
