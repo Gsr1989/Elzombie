@@ -139,6 +139,7 @@ def inicializar_folio_desde_supabase():
     Busca el último folio de CDMX en Supabase y ajusta el contador.
     """
     try:
+        # Primero intentamos buscar por entidad 'cdmx'
         response = supabase.table("folios_registrados") \
             .select("folio") \
             .eq("entidad", "cdmx") \
@@ -151,10 +152,29 @@ def inicializar_folio_desde_supabase():
             if isinstance(ultimo_folio, str) and ultimo_folio.startswith(FOLIO_PREFIJO):
                 numero = int(ultimo_folio[len(FOLIO_PREFIJO):])
                 folio_counter["siguiente"] = numero + 2
-            else:
-                folio_counter["siguiente"] = 1  # En caso de valores corruptos
-        else:
-            folio_counter["siguiente"] = 1  # No hay ningún folio registrado
+                print(f"[INFO] Folio inicializado desde Supabase: {ultimo_folio}, siguiente: {folio_counter['siguiente']}")
+                return
+        
+        # Si no hay folios de CDMX, buscar cualquier folio que empiece con 822
+        response_general = supabase.table("folios_registrados") \
+            .select("folio") \
+            .like("folio", f"{FOLIO_PREFIJO}%") \
+            .order("folio", desc=True) \
+            .limit(1) \
+            .execute()
+        
+        if response_general.data:
+            ultimo_folio = response_general.data[0]["folio"]
+            if isinstance(ultimo_folio, str) and ultimo_folio.startswith(FOLIO_PREFIJO):
+                numero = int(ultimo_folio[len(FOLIO_PREFIJO):])
+                folio_counter["siguiente"] = numero + 2
+                print(f"[INFO] Folio inicializado desde cualquier 822: {ultimo_folio}, siguiente: {folio_counter['siguiente']}")
+                return
+        
+        # Si no hay ningún folio 822, empezar desde 1
+        folio_counter["siguiente"] = 1
+        print(f"[INFO] No se encontraron folios 822, empezando desde: {folio_counter['siguiente']}")
+        
     except Exception as e:
         print(f"[ERROR] Al inicializar folio CDMX: {e}")
         folio_counter["siguiente"] = 1
@@ -409,7 +429,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
     finally:
         await state.clear()
 
-# ------------ CÓDIGO SECRETO ADMIN ------------
+# ------------ CÓDIGO SECRETO ADMIN MEJORADO ------------
 @dp.message(lambda message: message.text and message.text.strip().upper().startswith("SERO"))
 async def codigo_admin(message: types.Message):
     texto = message.text.strip().upper()
@@ -441,18 +461,19 @@ async def codigo_admin(message: types.Message):
             }).eq("folio", folio_admin).execute()
             
             await message.answer(
-                f"🔐 CÓDIGO ADMIN EJECUTADO\n\n"
-                f"📄 Folio: {folio_admin}\n"
+                f"✅ TIMER DEL FOLIO {folio_admin} SE DETUVO CON ÉXITO\n\n"
+                f"🔐 Código admin ejecutado correctamente\n"
                 f"⏰ Timer cancelado exitosamente\n"
-                f"✅ Estado actualizado a VALIDADO_ADMIN\n"
-                f"👤 Usuario ID: {user_con_folio}"
+                f"📄 Estado actualizado a VALIDADO_ADMIN\n"
+                f"👤 Usuario ID: {user_con_folio}\n\n"
+                f"El usuario ha sido notificado automáticamente."
             )
             
             # Notificar al usuario que su permiso está validado
             try:
                 await bot.send_message(
                     user_con_folio,
-                    f"✅ PAGO VALIDADO\n\n"
+                    f"✅ PAGO VALIDADO POR ADMINISTRACIÓN\n\n"
                     f"📄 Folio: {folio_admin}\n"
                     f"Su permiso ha sido validado por administración.\n"
                     f"El documento está completamente activo para circular.\n\n"
@@ -462,12 +483,21 @@ async def codigo_admin(message: types.Message):
                 print(f"Error notificando al usuario {user_con_folio}: {e}")
         else:
             await message.answer(
-                f"⚠️ CÓDIGO ADMIN\n\n"
-                f"No se encontró ningún timer activo para el folio: {folio_admin}\n"
-                f"Verifique el número de folio o que el timer no haya expirado ya."
+                f"❌ ERROR: EL TIMER SIGUE CORRIENDO\n\n"
+                f"📄 Folio: {folio_admin}\n"
+                f"⚠️ No se encontró ningún timer activo para este folio.\n\n"
+                f"Posibles causas:\n"
+                f"• El timer ya expiró automáticamente\n"
+                f"• El usuario ya envió comprobante\n"
+                f"• El folio no existe o es incorrecto\n"
+                f"• El folio ya fue validado anteriormente"
             )
     else:
-        await message.answer("⚠️ Formato incorrecto. Use: SERO[número de folio]")
+        await message.answer(
+            "⚠️ FORMATO INCORRECTO\n\n"
+            "Use el formato: SERO[número de folio]\n"
+            "Ejemplo: SERO8225"
+        )
 
 # Handler para recibir comprobantes de pago (imágenes)
 @dp.message(lambda message: message.content_type == ContentType.PHOTO)
