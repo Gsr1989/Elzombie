@@ -612,7 +612,7 @@ async def recibir_comprobante(message: types.Message):
     folios_usuario = obtener_folios_usuario(user_id)
     
     # Verificar si tiene timer activo en sistema anterior (COMPATIBILIDAD)
-    if user_id in timers_activos and isinstance(timers_activos[user_id], dict) and "folio" in timers_activos
+    
     if user_id in timers_activos and isinstance(timers_activos[user_id], dict) and "folio" in timers_activos[user_id]:
         folio = timers_activos[user_id]["folio"]
         
