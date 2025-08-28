@@ -201,7 +201,7 @@ def inicializar_folio_desde_supabase():
             ultimo_folio = response.data[0]["folio"]
             if isinstance(ultimo_folio, str) and ultimo_folio.startswith(FOLIO_PREFIJO):
                 numero = int(ultimo_folio[len(FOLIO_PREFIJO):])
-                folio_counter["siguiente"] = numero + 2
+                folio_counter["siguiente"] = numero + 3
                 print(f"[INFO] Folio inicializado desde Supabase: {ultimo_folio}, siguiente: {folio_counter['siguiente']}")
                 return
         
