@@ -181,7 +181,7 @@ def obtener_siguiente_folio():
     """
     folio_num = folio_counter["siguiente"]
     folio = f"{FOLIO_PREFIJO}{folio_num}"
-    folio_counter["siguiente"] += 2
+    folio_counter["siguiente"] += 3
     return folio
 
 def inicializar_folio_desde_supabase():
