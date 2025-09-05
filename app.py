@@ -172,7 +172,7 @@ def obtener_folios_usuario(user_id: int) -> list:
     return user_folios.get(user_id, [])
 
 # ------------ FOLIO CDMX CON PREFIJO 822 PROGRESIVO ------------
-FOLIO_PREFIJO = "822"
+FOLIO_PREFIJO = "122"
 folio_counter = {"siguiente": 1}
 
 def obtener_siguiente_folio():
@@ -265,10 +265,10 @@ def generar_pdf_principal(datos: dict) -> str:
         qr_pix = fitz.Pixmap(buf.read())
 
         # Coordenadas del QR (ajustar según tu PDF de CDMX)
-        x_qr = 400  
-        y_qr = 200
-        ancho_qr = 60
-        alto_qr = 60
+        x_qr = 50  
+        y_qr = 300
+        ancho_qr = 90
+        alto_qr = 90
 
         page.insert_image(
             fitz.Rect(x_qr, y_qr, x_qr + ancho_qr, y_qr + alto_qr),
