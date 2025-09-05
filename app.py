@@ -265,8 +265,8 @@ def generar_pdf_principal(datos: dict) -> str:
         qr_pix = fitz.Pixmap(buf.read())
 
         # Coordenadas del QR (ajustar según tu PDF de CDMX)
-        x_qr = 48  
-        y_qr = 650
+        x_qr = 49  
+        y_qr = 653
         ancho_qr = 96
         alto_qr = 96
 
