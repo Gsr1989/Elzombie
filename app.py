@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, suppress
 import asyncio
 import random
 from PIL import Image
+import qrcode
 
 # ------------ CONFIG ------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
