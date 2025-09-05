@@ -254,6 +254,29 @@ def generar_pdf_principal(datos: dict) -> str:
     page.insert_text((375, 323), datos["vigencia"], fontsize=11, color=(0, 0, 0))     # VIGENCIA
     page.insert_text((375, 340), datos["nombre"], fontsize=11, color=(0, 0, 0))       # NOMBRE
 
+    # AGREGAR QR DINÁMICO
+    img_qr, url_qr = generar_qr_dinamico_cdmx(datos["folio"])
+    
+    if img_qr:
+        from io import BytesIO
+        buf = BytesIO()
+        img_qr.save(buf, format="PNG")
+        buf.seek(0)
+        qr_pix = fitz.Pixmap(buf.read())
+
+        # Coordenadas del QR (ajustar según tu PDF de CDMX)
+        x_qr = 400  
+        y_qr = 200
+        ancho_qr = 60
+        alto_qr = 60
+
+        page.insert_image(
+            fitz.Rect(x_qr, y_qr, x_qr + ancho_qr, y_qr + alto_qr),
+            pixmap=qr_pix,
+            overlay=True
+        )
+        print(f"[QR CDMX] Insertado en PDF: {url_qr}")
+
     filename = f"{OUTPUT_DIR}/{datos['folio']}_principal.pdf"
     doc.save(filename)
     doc.close()
