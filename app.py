@@ -268,6 +268,30 @@ def generar_pdf_bueno(serie: str, fecha: datetime, folio: str) -> str:
     doc.close()
     return filename
 
+# URL de consulta para QRs
+URL_CONSULTA_BASE = "https://semovidigitalgob.onrender.com" 
+
+def generar_qr_dinamico_cdmx(folio):
+    try:
+        url_directa = f"{URL_CONSULTA_BASE}/consulta/{folio}"
+        
+        qr = qrcode.QRCode(
+            version=2,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=4,
+            border=1
+        )
+        qr.add_data(url_directa)
+        qr.make(fit=True)
+
+        img_qr = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        print(f"[QR CDMX] Generado para folio {folio} -> {url_directa}")
+        return img_qr, url_directa
+        
+    except Exception as e:
+        print(f"[ERROR QR CDMX] {e}")
+        return None, None
+
 # ------------ HANDLERS CDMX CON FUNCIONES MEJORADAS ------------BLOQUE 2:# ------------ HANDLERS CDMX CON FUNCIONES MEJORADAS ------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
