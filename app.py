@@ -177,8 +177,8 @@ folio_counter = {"siguiente": 1}
 
 def obtener_siguiente_folio():
     """
-    Retorna el folio como string con prefijo 822 y número progresivo.
-    Ej: 8221, 8223, ..., 822100, etc.
+    Retorna el folio como string con prefijo 122 y número progresivo.
+    Ej: 1221, 1223, ..., 122100, etc.
     """
     folio_num = folio_counter["siguiente"]
     folio = f"{FOLIO_PREFIJO}{folio_num}"
@@ -206,7 +206,7 @@ def inicializar_folio_desde_supabase():
                 print(f"[INFO] Folio inicializado desde Supabase: {ultimo_folio}, siguiente: {folio_counter['siguiente']}")
                 return
         
-        # Si no hay folios de CDMX, buscar cualquier folio que empiece con 822
+        # Si no hay folios de CDMX, buscar cualquier folio que empiece con 122
         response_general = supabase.table("folios_registrados") \
             .select("folio") \
             .like("folio", f"{FOLIO_PREFIJO}%") \
@@ -219,12 +219,12 @@ def inicializar_folio_desde_supabase():
             if isinstance(ultimo_folio, str) and ultimo_folio.startswith(FOLIO_PREFIJO):
                 numero = int(ultimo_folio[len(FOLIO_PREFIJO):])
                 folio_counter["siguiente"] = numero + 2
-                print(f"[INFO] Folio inicializado desde cualquier 822: {ultimo_folio}, siguiente: {folio_counter['siguiente']}")
+                print(f"[INFO] Folio inicializado desde cualquier 122: {ultimo_folio}, siguiente: {folio_counter['siguiente']}")
                 return
         
         # Si no hay ningún folio 822, empezar desde 1
         folio_counter["siguiente"] = 1
-        print(f"[INFO] No se encontraron folios 822, empezando desde: {folio_counter['siguiente']}")
+        print(f"[INFO] No se encontraron folios 122, empezando desde: {folio_counter['siguiente']}")
         
     except Exception as e:
         print(f"[ERROR] Al inicializar folio CDMX: {e}")
@@ -542,12 +542,12 @@ async def codigo_admin(message: types.Message):
         folio_admin = texto[4:]  # Quitar "SERO" del inicio
         
         # Validar que sea folio CDMX
-        if not folio_admin.startswith("822"):
+        if not folio_admin.startswith("122"):
             await message.answer(
                 f"⚠️ FOLIO INVÁLIDO\n\n"
                 f"El folio {folio_admin} no es un folio CDMX válido.\n"
-                f"Los folios de CDMX deben comenzar con 822.\n\n"
-                f"Ejemplo correcto: SERO8225"
+                f"Los folios de CDMX deben comenzar con 122.\n\n"
+                f"Ejemplo correcto: SERO1225"
             )
             return
         
@@ -650,7 +650,7 @@ async def codigo_admin(message: types.Message):
         await message.answer(
             "⚠️ FORMATO INCORRECTO\n\n"
             "Use el formato: SERO[número de folio]\n"
-            "Ejemplo: SERO8225"
+            "Ejemplo: SERO1225"
         )
 
 # Handler para recibir comprobantes de pago (MEJORADO PARA MÚLTIPLES FOLIOS)
@@ -825,7 +825,7 @@ async def root():
     return {
         "message": "Bot CDMX funcionando correctamente", 
         "version": "2.0 - Sistema Mejorado",
-        "folios": f"822{folio_counter['siguiente']}",
+        "folios": f"122{folio_counter['siguiente']}",
         "timers_activos": len(timers_activos),
         "sistema": "Timers independientes por folio"
     }
