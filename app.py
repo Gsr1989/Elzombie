@@ -30,8 +30,8 @@ PRECIO_PERMISO = 200
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ------------ TIMER CONFIG ------------
-TIMER_TOTAL_MIN = 12 * 60  # 12 horas en minutos
+# ------------ TIMER CONFIG (24 HORAS) ------------
+TIMER_TOTAL_MIN = 24 * 60  # 24 horas en minutos
 REMINDER_MINUTES = [60, 30, 10]  # avisos a 60, 30 y 10 min restantes
 
 # ------------ SUPABASE ------------
@@ -93,7 +93,7 @@ async def enviar_recordatorio(folio: str, minutos_restantes: int):
         print(f"Error enviando recordatorio para folio {folio}: {e}")
 
 async def iniciar_timer_pago(user_id: int, folio: str):
-    """Inicia el timer de 12 horas con recordatorios a 60, 30 y 10 minutos restantes para un folio específico"""
+    """Inicia el timer de 24 horas con recordatorios a 60, 30 y 10 minutos restantes para un folio específico"""
     async def timer_task():
         start_time = datetime.now()
         print(f"[TIMER] Iniciado para folio {folio}, usuario {user_id}")
@@ -176,19 +176,45 @@ def obtener_folios_usuario(user_id: int) -> list:
     """Obtiene todos los folios activos de un usuario"""
     return user_folios.get(user_id, [])
 
-# ------------ FOLIO CDMX CON PREFIJO 822 PROGRESIVO ------------
+# ------------ FOLIO CDMX CON PREFIJO 122 PROGRESIVO Y VERIFICACIÓN EN SUPABASE ------------
 FOLIO_PREFIJO = "122"
 folio_counter = {"siguiente": 1}
+MAX_INTENTOS_FOLIO = 100  # Máximo de intentos para encontrar un folio disponible
+
+def folio_existe_en_supabase(folio: str) -> bool:
+    """Verifica si un folio ya existe en Supabase"""
+    try:
+        response = supabase.table("folios_registrados").select("folio").eq("folio", folio).execute()
+        return len(response.data) > 0
+    except Exception as e:
+        print(f"[ERROR] Verificando existencia de folio {folio}: {e}")
+        return False
 
 def obtener_siguiente_folio():
     """
     Retorna el folio como string con prefijo 122 y número progresivo.
-    Ej: 1221, 1223, ..., 122100, etc.
+    Verifica en Supabase que no exista. Si existe, incrementa hasta encontrar uno disponible.
+    Ej: 1221, 1225, ..., 122100, etc.
     """
-    folio_num = folio_counter["siguiente"]
-    folio = f"{FOLIO_PREFIJO}{folio_num}"
-    folio_counter["siguiente"] += 4
-    return folio
+    intentos = 0
+    while intentos < MAX_INTENTOS_FOLIO:
+        folio_num = folio_counter["siguiente"]
+        folio = f"{FOLIO_PREFIJO}{folio_num}"
+        
+        # Verificar si el folio existe en Supabase
+        if not folio_existe_en_supabase(folio):
+            # Folio disponible, incrementar contador para el siguiente
+            folio_counter["siguiente"] += 4
+            print(f"[FOLIO] Asignado: {folio}, siguiente será: {FOLIO_PREFIJO}{folio_counter['siguiente']}")
+            return folio
+        
+        # El folio ya existe, intentar con el siguiente
+        print(f"[FOLIO] {folio} ya existe, intentando con el siguiente...")
+        folio_counter["siguiente"] += 4
+        intentos += 1
+    
+    # Si llegamos aquí, se agotaron los intentos
+    raise Exception(f"No se pudo generar un folio único después de {MAX_INTENTOS_FOLIO} intentos")
 
 def inicializar_folio_desde_supabase():
     """
@@ -207,7 +233,7 @@ def inicializar_folio_desde_supabase():
             ultimo_folio = response.data[0]["folio"]
             if isinstance(ultimo_folio, str) and ultimo_folio.startswith(FOLIO_PREFIJO):
                 numero = int(ultimo_folio[len(FOLIO_PREFIJO):])
-                folio_counter["siguiente"] = numero + 3
+                folio_counter["siguiente"] = numero + 4
                 print(f"[INFO] Folio inicializado desde Supabase: {ultimo_folio}, siguiente: {folio_counter['siguiente']}")
                 return
 
@@ -223,7 +249,7 @@ def inicializar_folio_desde_supabase():
             ultimo_folio = response_general.data[0]["folio"]
             if isinstance(ultimo_folio, str) and ultimo_folio.startswith(FOLIO_PREFIJO):
                 numero = int(ultimo_folio[len(FOLIO_PREFIJO):])
-                folio_counter["siguiente"] = numero + 2
+                folio_counter["siguiente"] = numero + 4
                 print(f"[INFO] Folio inicializado desde cualquier 122: {ultimo_folio}, siguiente: {folio_counter['siguiente']}")
                 return
 
@@ -244,20 +270,23 @@ class PermisoForm(StatesGroup):
     motor = State()
     nombre = State()
 
-# ------------ GENERACIÓN PDF CDMX ------------
-def generar_pdf_principal(datos: dict) -> str:
-    doc = fitz.open(PLANTILLA_PDF)
-    page = doc[0]
+# ------------ GENERACIÓN PDF CDMX UNIFICADO (2 EN 1) ------------
+def generar_pdf_unificado(datos: dict) -> str:
+    """Genera un único PDF con ambas páginas: principal y bueno"""
+    # Abrir plantilla principal
+    doc_principal = fitz.open(PLANTILLA_PDF)
+    page_principal = doc_principal[0]
 
-    page.insert_text((87, 130), datos["folio"], fontsize=14, color=(1, 0, 0))         # FOLIO
-    page.insert_text((130, 145), datos["fecha"], fontsize=12, color=(0, 0, 0))        # FECHA
-    page.insert_text((87, 290), datos["marca"], fontsize=11, color=(0, 0, 0))         # MARCA
-    page.insert_text((375, 290), datos["serie"], fontsize=11, color=(0, 0, 0))        # SERIE
-    page.insert_text((87, 307), datos["linea"], fontsize=11, color=(0, 0, 0))         # LINEA
-    page.insert_text((375, 307), datos["motor"], fontsize=11, color=(0, 0, 0))        # MOTOR
-    page.insert_text((87, 323), datos["anio"], fontsize=11, color=(0, 0, 0))          # AÑO
-    page.insert_text((375, 323), datos["vigencia"], fontsize=11, color=(0, 0, 0))     # VIGENCIA
-    page.insert_text((375, 340), datos["nombre"], fontsize=11, color=(0, 0, 0))       # NOMBRE
+    # Insertar datos en página principal
+    page_principal.insert_text((87, 130), datos["folio"], fontsize=14, color=(1, 0, 0))         # FOLIO
+    page_principal.insert_text((130, 145), datos["fecha"], fontsize=12, color=(0, 0, 0))        # FECHA
+    page_principal.insert_text((87, 290), datos["marca"], fontsize=11, color=(0, 0, 0))         # MARCA
+    page_principal.insert_text((375, 290), datos["serie"], fontsize=11, color=(0, 0, 0))        # SERIE
+    page_principal.insert_text((87, 307), datos["linea"], fontsize=11, color=(0, 0, 0))         # LINEA
+    page_principal.insert_text((375, 307), datos["motor"], fontsize=11, color=(0, 0, 0))        # MOTOR
+    page_principal.insert_text((87, 323), datos["anio"], fontsize=11, color=(0, 0, 0))          # AÑO
+    page_principal.insert_text((375, 323), datos["vigencia"], fontsize=11, color=(0, 0, 0))     # VIGENCIA
+    page_principal.insert_text((375, 340), datos["nombre"], fontsize=11, color=(0, 0, 0))       # NOMBRE
 
     # AGREGAR QR DINÁMICO
     img_qr, url_qr = generar_qr_dinamico_cdmx(datos["folio"])
@@ -275,26 +304,31 @@ def generar_pdf_principal(datos: dict) -> str:
         ancho_qr = 96
         alto_qr = 96
 
-        page.insert_image(
+        page_principal.insert_image(
             fitz.Rect(x_qr, y_qr, x_qr + ancho_qr, y_qr + alto_qr),
             pixmap=qr_pix,
             overlay=True
         )
         print(f"[QR CDMX] Insertado en PDF: {url_qr}")
 
-    filename = f"{OUTPUT_DIR}/{datos['folio']}_principal.pdf"
-    doc.save(filename)
-    doc.close()
-    return filename
+    # Abrir plantilla bueno y agregar datos
+    doc_bueno = fitz.open(PLANTILLA_BUENO)
+    page_bueno = doc_bueno[0]
+    page_bueno.insert_text((135.02, 193.88), datos["serie"], fontsize=6)
+    page_bueno.insert_text((190, 324), datos["fecha_obj"].strftime("%d/%m/%Y"), fontsize=6)
 
-def generar_pdf_bueno(serie: str, fecha: datetime, folio: str) -> str:
-    doc = fitz.open(PLANTILLA_BUENO)
-    page = doc[0]
-    page.insert_text((135.02, 193.88), serie, fontsize=6)
-    page.insert_text((190, 324), fecha.strftime("%d/%m/%Y"), fontsize=6)
-    filename = f"{OUTPUT_DIR}/{folio}_bueno.pdf"
-    doc.save(filename)
-    doc.close()
+    # Insertar página bueno al documento principal
+    doc_principal.insert_pdf(doc_bueno)
+    
+    # Cerrar documento temporal
+    doc_bueno.close()
+
+    # Guardar documento unificado
+    filename = f"{OUTPUT_DIR}/{datos['folio']}_completo.pdf"
+    doc_principal.save(filename)
+    doc_principal.close()
+    
+    print(f"[PDF UNIFICADO] Generado: {filename}")
     return filename
 
 # URL de consulta para QRs
@@ -329,7 +363,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
         "🏛️ Sistema Digital de Permisos CDMX\n"
         "Servicio oficial automatizado para trámites vehiculares\n\n"
         "💰 Costo del permiso: El costo es el mismo de siempre\n"
-        "⏰ Tiempo límite para pago: 12 horas\n"
+        "⏰ Tiempo límite para pago: 24 horas\n"
         "📸 Métodos de pago: Transferencia bancaria y OXXO\n\n"
         "📋 Use /permiso para iniciar su trámite\n"
         "⚠️ IMPORTANTE: Su folio será eliminado automáticamente si no realiza el pago dentro del tiempo límite"
@@ -347,7 +381,7 @@ async def permiso_cmd(message: types.Message, state: FSMContext):
     await message.answer(
         f"🚗 TRÁMITE DE PERMISO CDMX\n\n"
         f"📋 Costo: El costo es el mismo de siempre\n"
-        f"⏰ Tiempo para pagar: 12 horas\n"
+        f"⏰ Tiempo para pagar: 24 horas\n"
         f"📱 Concepto de pago: Su folio asignado\n\n"
         f"Al continuar acepta que su folio será eliminado si no paga en el tiempo establecido."
         + mensaje_folios + "\n\n"
@@ -426,7 +460,17 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos = await state.get_data()
     nombre = message.text.strip().upper()
     datos["nombre"] = nombre
-    datos["folio"] = obtener_siguiente_folio()
+    
+    try:
+        datos["folio"] = obtener_siguiente_folio()
+    except Exception as e:
+        await message.answer(
+            f"❌ ERROR GENERANDO FOLIO\n\n"
+            f"No se pudo asignar un folio único: {str(e)}\n\n"
+            "Por favor, contacte al soporte técnico."
+        )
+        await state.clear()
+        return
 
     # -------- FECHAS --------
     hoy = datetime.now()
@@ -438,34 +482,28 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos["fecha"] = f"{hoy.day} de {meses[hoy.month]} del {hoy.year}"
     fecha_ven = hoy + timedelta(days=30)
     datos["vigencia"] = fecha_ven.strftime("%d/%m/%Y")
+    datos["fecha_obj"] = hoy  # Para el PDF bueno
     # -------------------------
 
     await message.answer(
         f"🔄 PROCESANDO PERMISO CDMX...\n\n"
         f"📄 Folio asignado: {datos['folio']}\n"
         f"👤 Titular: {nombre}\n\n"
-        "Generando documentos oficiales..."
+        "Generando documento oficial unificado..."
     )
 
     try:
-        # Generar PDFs
-        pdf_principal = generar_pdf_principal(datos)
-        pdf_bueno = generar_pdf_bueno(datos["serie"], hoy, datos["folio"])
+        # Generar PDF UNIFICADO (2 en 1)
+        pdf_unificado = generar_pdf_unificado(datos)
 
-        # Enviar documentos
+        # Enviar documento unificado
         await message.answer_document(
-            FSInputFile(pdf_principal),
-            caption=f"📋 PERMISO PRINCIPAL CDMX\n"
+            FSInputFile(pdf_unificado),
+            caption=f"📋 PERMISO COMPLETO CDMX\n"
                    f"Folio: {datos['folio']}\n"
                    f"Vigencia: 30 días\n"
+                   f"📄 Documento unificado con ambas páginas\n"
                    f"🏛️ Documento oficial con validez legal"
-        )
-
-        await message.answer_document(
-            FSInputFile(pdf_bueno),
-            caption=f"📋 DOCUMENTO DE VERIFICACIÓN\n"
-                   f"Serie: {datos['serie']}\n"
-                   f"🔍 Comprobante adicional de autenticidad"
         )
 
         # Guardar en base de datos con estado PENDIENTE
@@ -501,7 +539,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "user_id": message.from_user.id
         }).execute()
 
-        # INICIAR TIMER DE PAGO (12 horas, avisos 60/30/10)
+        # INICIAR TIMER DE PAGO (24 horas, avisos 60/30/10)
         await iniciar_timer_pago(message.from_user.id, datos['folio'])
 
         # Mensaje de instrucciones de pago
@@ -509,7 +547,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
             f"💰 INSTRUCCIONES DE PAGO\n\n"
             f"📄 Folio: {datos['folio']}\n"
             f"💵 Monto: El costo es el mismo de siempre\n"
-            f"⏰ Tiempo límite: 12 horas\n\n"
+            f"⏰ Tiempo límite: 24 horas\n\n"
 
             "🏦 TRANSFERENCIA BANCARIA:\n"
             "• Banco: AZTECA\n"
@@ -524,7 +562,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
             "• Cantidad exacta: El costo de siempre\n\n"
 
             f"📸 IMPORTANTE: Una vez realizado el pago, envíe la fotografía de su comprobante.\n\n"
-            f"⚠️ ADVERTENCIA: Si no completa el pago en 12 horas, el folio {datos['folio']} será eliminado automáticamente del sistema."
+            f"⚠️ ADVERTENCIA: Si no completa el pago en 24 horas, el folio {datos['folio']} será eliminado automáticamente del sistema."
         )
 
     except Exception as e:
