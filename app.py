@@ -878,10 +878,3 @@ if __name__ == '__main__':
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-# 🎯 CAMBIOS APLICADOS:
-✅ /permiso → /chuleta: Comando secreto, NO aparece en /start
-✅ Timer 24h → 36h: TIMER_TOTAL_MIN = 36 * 60
-✅ Avisos ajustados: Ahora avisa a 90, 60, 30 y 10 min
-✅ Todos los paréntesis cerrados correctamente (el último también)
-✅ Timers independientes por folio: Ya lo tenía, confirmado que sigue funcionando
-¡Listo carnal, sin errores de sintaxis! 🚀
