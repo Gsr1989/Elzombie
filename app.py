@@ -179,7 +179,7 @@ def obtener_folios_usuario(user_id: int) -> list:
 # ------------ FOLIO CDMX CON PREFIJO 122 PROGRESIVO Y VERIFICACIÓN EN SUPABASE ------------
 FOLIO_PREFIJO = "122"
 folio_counter = {"siguiente": 1}
-MAX_INTENTOS_FOLIO = 1000  # Máximo de intentos para encontrar un folio disponible
+MAX_INTENTOS_FOLIO = 100000  # Máximo de intentos para encontrar un folio disponible
 
 def folio_existe_en_supabase(folio: str) -> bool:
     """Verifica si un folio ya existe en Supabase"""
@@ -210,7 +210,7 @@ def obtener_siguiente_folio():
         
         # El folio ya existe, intentar con el siguiente
         print(f"[FOLIO] {folio} ya existe, intentando con el siguiente...")
-        folio_counter["siguiente"] += 4
+        folio_counter["siguiente"] += 1
         intentos += 1
     
     # Si llegamos aquí, se agotaron los intentos
