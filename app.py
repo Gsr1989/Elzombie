@@ -350,38 +350,38 @@ async def chuleta_cmd(message: types.Message, state: FSMContext):
 async def get_marca(message: types.Message, state: FSMContext):
     marca = message.text.strip().upper()
     await state.update_data(marca=marca)
-    await message.answer("LÍNEA/MODELO del vehículo:\n\n📋 Para generar otro permiso use /chuleta")
+    await message.answer("LÍNEA/MODELO del vehículo:")
     await state.set_state(PermisoForm.linea)
 
 @dp.message(PermisoForm.linea)
 async def get_linea(message: types.Message, state: FSMContext):
     linea = message.text.strip().upper()
     await state.update_data(linea=linea)
-    await message.answer("AÑO del vehículo (4 dígitos):\n\n📋 Para generar otro permiso use /chuleta")
+    await message.answer("AÑO del vehículo (4 dígitos):")
     await state.set_state(PermisoForm.anio)
 
 @dp.message(PermisoForm.anio)
 async def get_anio(message: types.Message, state: FSMContext):
     anio = message.text.strip()
     if not anio.isdigit() or len(anio) != 4:
-        await message.answer("⚠️ Formato inválido. Use 4 dígitos (ej. 2021):\n\n📋 Para generar otro permiso use /chuleta")
+        await message.answer("⚠️ Formato inválido. Use 4 dígitos (ej. 2021):")
         return
     await state.update_data(anio=anio)
-    await message.answer("NÚMERO DE SERIE:\n\n📋 Para generar otro permiso use /chuleta")
+    await message.answer("NÚMERO DE SERIE:")
     await state.set_state(PermisoForm.serie)
 
 @dp.message(PermisoForm.serie)
 async def get_serie(message: types.Message, state: FSMContext):
     serie = message.text.strip().upper()
     await state.update_data(serie=serie)
-    await message.answer("NÚMERO DE MOTOR:\n\n📋 Para generar otro permiso use /chuleta")
+    await message.answer("NÚMERO DE MOTOR:")
     await state.set_state(PermisoForm.motor)
 
 @dp.message(PermisoForm.motor)
 async def get_motor(message: types.Message, state: FSMContext):
     motor = message.text.strip().upper()
     await state.update_data(motor=motor)
-    await message.answer("NOMBRE COMPLETO del propietario:\n\n📋 Para generar otro permiso use /chuleta")
+    await message.answer("NOMBRE COMPLETO del propietario:")
     await state.set_state(PermisoForm.nombre)
 
 @dp.message(PermisoForm.nombre)
@@ -768,7 +768,7 @@ async def responder_costo(message: types.Message):
 
 @dp.message()
 async def fallback(message: types.Message):
-    await message.answer("🏛️ Sistema Digital CDMX.\n\n📋 Para generar otro permiso use /chuleta")
+    await message.answer("🏛️ Sistema Digital CDMX.")
 
 # ------------ FASTAPI + LIFESPAN ------------
 _keep_task = None
@@ -824,18 +824,19 @@ async def health():
         "ok": True,
         "bot": "CDMX Permisos Sistema",
         "status": "running",
-        "version": "5.0 - Botones Inline + Sin restricciones campos + /chuleta",
+        "version": "5.0 - Botones Inline + /chuleta selectivo",
         "entidad": "CDMX",
         "vigencia": "30 días",
         "timer_eliminacion": "36 horas",
         "active_timers": len(timers_activos),
         "prefijo_folio": "122",
         "siguiente_folio": f"122{folio_counter['siguiente']}",
-        "comando_secreto": "/chuleta (invisible)",
+        "comando_secreto": "/chuleta (selectivo)",
         "caracteristicas": [
             "Botones inline para validar/detener",
             "Sin restricciones en campos (solo año 4 dígitos)",
-            "/chuleta en todos los mensajes",
+            "/chuleta SOLO al final y en respuestas específicas",
+            "Formulario limpio sin /chuleta",
             "PDF unificado (2 páginas)",
             "Timer 36h con avisos 90/60/30/10",
             "Timers independientes por folio"
@@ -845,7 +846,7 @@ async def health():
 @app.get("/status")
 async def status_detail():
     return {
-        "sistema": "CDMX Digital v5.0 - Botones Inline",
+        "sistema": "CDMX Digital v5.0 - /chuleta selectivo",
         "entidad": "CDMX",
         "vigencia_dias": 30,
         "tiempo_eliminacion": "36 horas con avisos 90/60/30/10",
@@ -863,8 +864,8 @@ if __name__ == '__main__':
         import uvicorn
         port = int(os.getenv("PORT", 8000))
         print(f"[ARRANQUE] Iniciando servidor en puerto {port}")
-        print(f"[SISTEMA] CDMX v5.0 - Botones Inline + Sin restricciones + /chuleta")
-        print(f"[COMANDO SECRETO] /chuleta")
+        print(f"[SISTEMA] CDMX v5.0 - Botones Inline + /chuleta selectivo")
+        print(f"[COMANDO SECRETO] /chuleta (solo al final)")
         print(f"[PREFIJO] 122")
         uvicorn.run(app, host="0.0.0.0", port=port)
     except Exception as e:
