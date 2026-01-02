@@ -262,8 +262,8 @@ def generar_pdf_unificado(datos: dict) -> str:
         doc_principal = fitz.open(PLANTILLA_PDF)
         page_principal = doc_principal[0]
 
-        page_principal.insert_text((87, 130), "FOLIO: ", fontsize=14, color=(0, 0, 0))
-        page_principal.insert_text((137, 130), datos["folio"], fontsize=14, color=(1, 0, 0))
+        page_principal.insert_text((77, 130), "FOLIO: ", fontsize=14, color=(0, 0, 0))
+        page_principal.insert_text((127, 130), datos["folio"], fontsize=14, color=(1, 0, 0))
         page_principal.insert_text((130, 145), datos["fecha"], fontsize=12, color=(0, 0, 0))
         page_principal.insert_text((87, 290), datos["marca"], fontsize=11, color=(0, 0, 0))
         page_principal.insert_text((375, 290), datos["serie"], fontsize=11, color=(0, 0, 0))
