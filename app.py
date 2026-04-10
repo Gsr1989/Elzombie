@@ -5,6 +5,7 @@ import fitz
 import os
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
+from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -15,6 +16,8 @@ import asyncio
 import random
 from PIL import Image
 import qrcode
+import aiohttp
+from aiogram.client.session.aiohttp import AiohttpSession
 
 # ------------ CONFIG ------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -33,7 +36,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------ BOT ------------
-bot = Bot(token=BOT_TOKEN)
+# Session con timeout de 120s para evitar timeout en send_document
+_bot_session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=120))
+bot = Bot(token=BOT_TOKEN, session=_bot_session)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -628,21 +633,128 @@ async def callback_seleccion_dias(callback: CallbackQuery):
 
     datos = datos_pendientes.pop(user_id)
 
+    # ✅ RESPONDER CALLBACK INMEDIATAMENTE (Telegram exige respuesta en <5s)
     await callback.answer(f"✅ {dias} días seleccionados", show_alert=False)
 
-    # Actualizar mensaje con la opción elegida
+    # Actualizar mensaje con estado de generación
     precio = PRECIO_BASE * (dias // 30)
-    await callback.message.edit_text(
-        f"📋 Folio: <b>{datos['folio']}</b>\n"
-        f"👤 Titular: <b>{datos['nombre']}</b>\n"
-        f"📅 Vigencia: <b>{dias} días</b>\n"
-        f"💵 Monto: <b>${precio}</b>\n\n"
-        f"🔄 Generando documentación...",
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            f"📋 Folio: <b>{datos['folio']}</b>\n"
+            f"👤 Titular: <b>{datos['nombre']}</b>\n"
+            f"📅 Vigencia: <b>{dias} días</b>\n"
+            f"💵 Monto: <b>${precio}</b>\n\n"
+            f"🔄 Generando documentación...",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"[WARN] No se pudo editar mensaje: {e}")
 
-    # Generar y enviar PDF
-    await procesar_y_enviar_pdf(callback, datos, dias)
+    # 🔥 Lanzar generación y envío como tarea en background
+    # Así el webhook regresa de inmediato y no hay timeout
+    chat_id = callback.message.chat.id
+    asyncio.create_task(generar_y_enviar_background(chat_id, datos, dias))
+
+
+async def generar_y_enviar_background(chat_id: int, datos: dict, dias: int):
+    """Corre en background: genera PDF y lo manda. Sin bloquear el webhook."""
+    user_id = datos["user_id"]
+    precio = PRECIO_BASE * (dias // 30)
+    hoy = datos["fecha_obj"]
+    fecha_ven = hoy + timedelta(days=dias)
+
+    try:
+        pdf_path = generar_pdf_unificado(datos, dias)
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔑 Validar Admin", callback_data=f"validar_{datos['folio']}"),
+                InlineKeyboardButton(text="⏹️ Detener Timer", callback_data=f"detener_{datos['folio']}")
+            ]
+        ])
+
+        await bot.send_document(
+            chat_id,
+            FSInputFile(pdf_path),
+            caption=(
+                f"📋 PERMISO DE CIRCULACIÓN - CDMX (COMPLETO)\n"
+                f"Folio: {datos['folio']}\n"
+                f"Vigencia: {dias} días ({fecha_ven.strftime('%d/%m/%Y')})\n"
+                f"Monto: ${precio}\n\n"
+                f"✅ Documento con 2 páginas unificadas\n\n"
+                f"⏰ TIMER ACTIVO (36 horas)"
+            ),
+            reply_markup=keyboard
+        )
+
+        # Guardar en Supabase
+        supabase.table("folios_registrados").insert({
+            "folio": datos["folio"],
+            "marca": datos["marca"],
+            "linea": datos["linea"],
+            "anio": datos["anio"],
+            "numero_serie": datos["serie"],
+            "numero_motor": datos["motor"],
+            "nombre": datos["nombre"],
+            "fecha_expedicion": hoy.date().isoformat(),
+            "fecha_vencimiento": fecha_ven.date().isoformat(),
+            "entidad": "cdmx",
+            "estado": "PENDIENTE",
+            "user_id": user_id,
+            "username": datos.get("username", "Sin username"),
+            "dias_permiso": dias,
+            "precio": precio
+        }).execute()
+
+        supabase.table("borradores_registros").insert({
+            "folio": datos["folio"],
+            "entidad": "CDMX",
+            "numero_serie": datos["serie"],
+            "marca": datos["marca"],
+            "linea": datos["linea"],
+            "numero_motor": datos["motor"],
+            "anio": datos["anio"],
+            "fecha_expedicion": hoy.isoformat(),
+            "fecha_vencimiento": fecha_ven.isoformat(),
+            "contribuyente": datos["nombre"],
+            "estado": "PENDIENTE",
+            "user_id": user_id,
+            "dias_permiso": dias,
+            "precio": precio
+        }).execute()
+
+        await iniciar_timer_eliminacion(user_id, datos["folio"])
+
+        await bot.send_message(
+            user_id,
+            f"💰 INSTRUCCIONES DE PAGO\n\n"
+            f"📄 Folio: {datos['folio']}\n"
+            f"📅 Vigencia: {dias} días\n"
+            f"💵 Monto: ${precio}\n"
+            f"⏰ Tiempo límite: 36 horas\n\n"
+            f"🏦 TRANSFERENCIA:\n"
+            f"• Banco: AZTECA\n"
+            f"• Titular: LIZBETH LAZCANO MOSCO\n"
+            f"• Cuenta: 127180013037579543\n"
+            f"• Concepto: Permiso {datos['folio']}\n\n"
+            f"🏪 OXXO:\n"
+            f"• Referencia: 2242170180385581\n"
+            f"• Titular: LIZBETH LAZCANO MOSCO\n"
+            f"• Monto: ${precio}\n\n"
+            f"📸 Envía la foto del comprobante para validar.\n"
+            f"⚠️ Si no pagas en 36 horas, el folio se elimina automáticamente.\n\n"
+            f"📋 Para generar otro permiso use /chuleta"
+        )
+
+    except Exception as e:
+        print(f"[ERROR] generar_y_enviar_background folio {datos.get('folio', '?')}: {e}")
+        try:
+            await bot.send_message(
+                user_id,
+                f"❌ Error generando el documento. Intenta de nuevo con /chuleta\n\nDetalle: {str(e)}"
+            )
+        except Exception:
+            pass
 
 # ------------ CALLBACK HANDLERS (BOTONES ADMIN) ------------
 @dp.callback_query(lambda c: c.data and c.data.startswith("validar_"))
