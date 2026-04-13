@@ -24,8 +24,8 @@ OUTPUT_DIR   = "documentos"
 PLANTILLA_PDF   = "cdmxdigital2025ppp.pdf"
 PLANTILLA_BUENO = "elbueno.pdf"
 
-PRECIO_PERMISO = 374   # fijo
-DIAS_PERMISO   = 30    # fijo siempre
+PRECIO_PERMISO = 374
+DIAS_PERMISO   = 30
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -48,7 +48,9 @@ FOLIO_PREFIJO      = "122"
 folio_counter      = {"siguiente": 1}
 MAX_INTENTOS_FOLIO = 100_000
 
-def folio_existe_en_supabase(folio: str) -> bool:
+# ── Supabase síncrono, se llama desde to_thread ──────────────────────────────
+
+def _sb_folio_existe(folio: str) -> bool:
     try:
         r = supabase.table("folios_registrados").select("folio").eq("folio", folio).execute()
         return len(r.data) > 0
@@ -56,17 +58,19 @@ def folio_existe_en_supabase(folio: str) -> bool:
         print(f"[ERROR] Verificando folio {folio}: {e}")
         return False
 
-def obtener_siguiente_folio():
+def _sb_obtener_siguiente_folio():
+    """Síncrono: busca el siguiente folio libre. Llamar con asyncio.to_thread."""
     for _ in range(MAX_INTENTOS_FOLIO):
         folio = f"{FOLIO_PREFIJO}{folio_counter['siguiente']}"
-        if not folio_existe_en_supabase(folio):
+        if not _sb_folio_existe(folio):
             folio_counter["siguiente"] += 4
             print(f"[FOLIO] Asignado: {folio}")
             return folio
         folio_counter["siguiente"] += 1
     raise Exception("No se pudo generar folio unico")
 
-def inicializar_folio_desde_supabase():
+def _sb_inicializar_folio():
+    """Síncrono: lee el último folio de Supabase. Llamar con asyncio.to_thread."""
     try:
         for usar_filtro in [True, False]:
             q = supabase.table("folios_registrados").select("folio")
@@ -87,6 +91,11 @@ def inicializar_folio_desde_supabase():
         print(f"[ERROR] inicializar_folio: {e}")
         folio_counter["siguiente"] = 1
 
+# ── Wrappers async ────────────────────────────────────────────────────────────
+
+async def obtener_siguiente_folio():
+    return await asyncio.to_thread(_sb_obtener_siguiente_folio)
+
 def obtener_folios_usuario(user_id: int) -> list:
     return user_folios.get(user_id, [])
 
@@ -94,8 +103,12 @@ def obtener_folios_usuario(user_id: int) -> list:
 async def eliminar_folio_automatico(folio: str):
     try:
         uid = timers_activos.get(folio, {}).get("user_id")
-        supabase.table("folios_registrados").delete().eq("folio", folio).execute()
-        supabase.table("borradores_registros").delete().eq("folio", folio).execute()
+        await asyncio.to_thread(
+            lambda: supabase.table("folios_registrados").delete().eq("folio", folio).execute()
+        )
+        await asyncio.to_thread(
+            lambda: supabase.table("borradores_registros").delete().eq("folio", folio).execute()
+        )
         if uid:
             await bot.send_message(uid,
                 f"TIEMPO AGOTADO - CDMX\n\n"
@@ -159,7 +172,8 @@ def limpiar_timer_folio(folio: str):
 # ------------ QR ------------
 URL_CONSULTA_BASE = "https://semovidigitalgob.onrender.com"
 
-def generar_qr_cdmx(folio: str):
+def _generar_qr_cdmx(folio: str):
+    """Síncrono – llamar con asyncio.to_thread."""
     try:
         url = f"{URL_CONSULTA_BASE}/consulta/{folio}"
         qr  = qrcode.QRCode(version=2, error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -173,8 +187,9 @@ def generar_qr_cdmx(folio: str):
         print(f"[ERROR QR] {e}")
         return None
 
-# ------------ GENERACION PDF ------------
-def generar_pdf_unificado(datos: dict) -> str:
+# ------------ GENERACION PDF (síncrono, llamar con to_thread) ----------------
+
+def _generar_pdf_unificado(datos: dict) -> str:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     filename  = f"{OUTPUT_DIR}/{datos['folio']}_completo.pdf"
     hoy       = datos["fecha_obj"]
@@ -197,7 +212,7 @@ def generar_pdf_unificado(datos: dict) -> str:
         page1.insert_text((375, 323), fecha_ven.strftime("%d/%m/%Y"), fontsize=11, color=(0,0,0))
         page1.insert_text((375, 340), datos["nombre"],                fontsize=11, color=(0,0,0))
 
-        img_qr = generar_qr_cdmx(datos["folio"])
+        img_qr = _generar_qr_cdmx(datos["folio"])
         if img_qr:
             from io import BytesIO
             buf = BytesIO()
@@ -212,27 +227,18 @@ def generar_pdf_unificado(datos: dict) -> str:
         page2 = doc2[0]
 
         X     = 135.02
-        Y_SER = 193.88   # coordenada original de serie
+        Y_SER = 193.88
 
-        # TITULO - 10pts arriba de serie - negritas
         titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS "
                   f"(PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
         page2.insert_text((X, Y_SER - 10), titulo,
                           fontsize=6, fontname="hebo", color=(0,0,0))
-
-        # SERIE - posicion original - negritas
-        page2.insert_text((X, Y_SER), datos["serie"],
+        page2.insert_text((X, Y_SER),      datos["serie"],
                           fontsize=6, fontname="hebo", color=(0,0,0))
-
-        # ANIO - 11pts abajo de serie (5 margen + 6 altura fuente) - negritas
         page2.insert_text((X, Y_SER + 11), anio_str,
                           fontsize=6, fontname="hebo", color=(0,0,0))
-
-        # PRECIO - 22pts abajo de serie - negritas
         page2.insert_text((X, Y_SER + 22), f"${PRECIO_PERMISO}",
                           fontsize=6, fontname="hebo", color=(0,0,0))
-
-        # Fecha (posicion original)
         page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"),
                           fontsize=6, fontname="hebo", color=(0,0,0))
 
@@ -272,14 +278,15 @@ async def send_document_con_retry(chat_id: int, path: str, caption: str,
                 await asyncio.sleep(5)
     return False
 
-# ------------ BACKGROUND: genera y manda PDF ------------
+# ------------ BACKGROUND: genera y manda PDF ---------------------------------
 async def generar_y_enviar_background(chat_id: int, datos: dict):
     user_id   = datos["user_id"]
     hoy       = datos["fecha_obj"]
     fecha_ven = hoy + timedelta(days=DIAS_PERMISO)
 
     try:
-        pdf_path = generar_pdf_unificado(datos)
+        # ── PDF en hilo separado para no bloquear el event loop ──────────────
+        pdf_path = await asyncio.to_thread(_generar_pdf_unificado, datos)
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Validar Admin",  callback_data=f"validar_{datos['folio']}"),
@@ -304,37 +311,39 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
                 f"Use /chuleta para reintentar.")
             return
 
-        # Guardar en Supabase - SOLO columnas que existen en la tabla
-        supabase.table("folios_registrados").insert({
-            "folio":             datos["folio"],
-            "marca":             datos["marca"],
-            "linea":             datos["linea"],
-            "anio":              datos["anio"],
-            "numero_serie":      datos["serie"],
-            "numero_motor":      datos["motor"],
-            "nombre":            datos["nombre"],
-            "fecha_expedicion":  hoy.date().isoformat(),
-            "fecha_vencimiento": fecha_ven.date().isoformat(),
-            "entidad":           "cdmx",
-            "estado":            "PENDIENTE",
-            "user_id":           user_id,
-            "username":          datos.get("username", "Sin username"),
-        }).execute()
+        # ── Guardar en Supabase en hilo separado ─────────────────────────────
+        def _insert_supabase():
+            supabase.table("folios_registrados").insert({
+                "folio":             datos["folio"],
+                "marca":             datos["marca"],
+                "linea":             datos["linea"],
+                "anio":              datos["anio"],
+                "numero_serie":      datos["serie"],
+                "numero_motor":      datos["motor"],
+                "nombre":            datos["nombre"],
+                "fecha_expedicion":  hoy.date().isoformat(),
+                "fecha_vencimiento": fecha_ven.date().isoformat(),
+                "entidad":           "cdmx",
+                "estado":            "PENDIENTE",
+                "user_id":           user_id,
+                "username":          datos.get("username", "Sin username"),
+            }).execute()
+            supabase.table("borradores_registros").insert({
+                "folio":             datos["folio"],
+                "entidad":           "CDMX",
+                "numero_serie":      datos["serie"],
+                "marca":             datos["marca"],
+                "linea":             datos["linea"],
+                "numero_motor":      datos["motor"],
+                "anio":              datos["anio"],
+                "fecha_expedicion":  hoy.isoformat(),
+                "fecha_vencimiento": fecha_ven.isoformat(),
+                "contribuyente":     datos["nombre"],
+                "estado":            "PENDIENTE",
+                "user_id":           user_id,
+            }).execute()
 
-        supabase.table("borradores_registros").insert({
-            "folio":             datos["folio"],
-            "entidad":           "CDMX",
-            "numero_serie":      datos["serie"],
-            "marca":             datos["marca"],
-            "linea":             datos["linea"],
-            "numero_motor":      datos["motor"],
-            "anio":              datos["anio"],
-            "fecha_expedicion":  hoy.isoformat(),
-            "fecha_vencimiento": fecha_ven.isoformat(),
-            "contribuyente":     datos["nombre"],
-            "estado":            "PENDIENTE",
-            "user_id":           user_id,
-        }).execute()
+        await asyncio.to_thread(_insert_supabase)
 
         await iniciar_timer_eliminacion(user_id, datos["folio"])
 
@@ -437,7 +446,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos["username"] = message.from_user.username or "Sin username"
 
     try:
-        datos["folio"] = obtener_siguiente_folio()
+        datos["folio"] = await obtener_siguiente_folio()   # ← async ahora
     except Exception as e:
         await message.answer(f"ERROR generando folio: {e}\n\nUse /chuleta")
         await state.clear()
@@ -459,7 +468,6 @@ async def get_nombre(message: types.Message, state: FSMContext):
         f"Generando documentacion...",
         parse_mode="HTML")
 
-    # PDF en background para no bloquear el webhook
     asyncio.create_task(generar_y_enviar_background(message.chat.id, datos))
 
 # ------------ CALLBACKS ADMIN ------------
@@ -474,12 +482,14 @@ async def callback_validar_admin(callback: CallbackQuery):
         cancelar_timer_folio(folio)
         try:
             now = datetime.now().isoformat()
-            supabase.table("folios_registrados").update(
-                {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-            ).eq("folio", folio).execute()
-            supabase.table("borradores_registros").update(
-                {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-            ).eq("folio", folio).execute()
+            await asyncio.to_thread(lambda: (
+                supabase.table("folios_registrados").update(
+                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
+                ).eq("folio", folio).execute(),
+                supabase.table("borradores_registros").update(
+                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
+                ).eq("folio", folio).execute()
+            ))
         except Exception as e:
             print(f"[ERROR] BD validar {folio}: {e}")
         await callback.answer("Folio validado", show_alert=True)
@@ -500,9 +510,11 @@ async def callback_detener_timer(callback: CallbackQuery):
     if folio in timers_activos:
         cancelar_timer_folio(folio)
         try:
-            supabase.table("folios_registrados").update(
-                {"estado": "TIMER_DETENIDO", "fecha_detencion": datetime.now().isoformat()}
-            ).eq("folio", folio).execute()
+            await asyncio.to_thread(lambda:
+                supabase.table("folios_registrados").update(
+                    {"estado": "TIMER_DETENIDO", "fecha_detencion": datetime.now().isoformat()}
+                ).eq("folio", folio).execute()
+            )
         except Exception as e:
             print(f"[ERROR] BD detener {folio}: {e}")
         await callback.answer("Timer detenido", show_alert=True)
@@ -528,12 +540,14 @@ async def codigo_admin(message: types.Message):
         cancelar_timer_folio(folio)
         try:
             now = datetime.now().isoformat()
-            supabase.table("folios_registrados").update(
-                {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-            ).eq("folio", folio).execute()
-            supabase.table("borradores_registros").update(
-                {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-            ).eq("folio", folio).execute()
+            await asyncio.to_thread(lambda: (
+                supabase.table("folios_registrados").update(
+                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
+                ).eq("folio", folio).execute(),
+                supabase.table("borradores_registros").update(
+                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
+                ).eq("folio", folio).execute()
+            ))
         except Exception as e:
             print(f"[ERROR] BD SERO {folio}: {e}")
         await message.answer(f"VALIDACION OK\nFolio: {folio}\nTimer cancelado.")
@@ -564,12 +578,14 @@ async def recibir_comprobante(message: types.Message):
     cancelar_timer_folio(folio)
     try:
         now = datetime.now().isoformat()
-        supabase.table("folios_registrados").update(
-            {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
-        ).eq("folio", folio).execute()
-        supabase.table("borradores_registros").update(
-            {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
-        ).eq("folio", folio).execute()
+        await asyncio.to_thread(lambda: (
+            supabase.table("folios_registrados").update(
+                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
+            ).eq("folio", folio).execute(),
+            supabase.table("borradores_registros").update(
+                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
+            ).eq("folio", folio).execute()
+        ))
     except Exception as e:
         print(f"[ERROR] comprobante {folio}: {e}")
     await message.answer(f"Comprobante recibido.\nFolio: {folio}\nTimer detenido.\n\nUse /chuleta para generar otro.")
@@ -587,12 +603,14 @@ async def especificar_folio_comprobante(message: types.Message):
     del pending_comprobantes[uid]
     try:
         now = datetime.now().isoformat()
-        supabase.table("folios_registrados").update(
-            {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
-        ).eq("folio", folio).execute()
-        supabase.table("borradores_registros").update(
-            {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
-        ).eq("folio", folio).execute()
+        await asyncio.to_thread(lambda: (
+            supabase.table("folios_registrados").update(
+                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
+            ).eq("folio", folio).execute(),
+            supabase.table("borradores_registros").update(
+                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
+            ).eq("folio", folio).execute()
+        ))
     except Exception as e:
         print(f"[ERROR] comprobante asociado {folio}: {e}")
     await message.answer(f"Comprobante asociado.\nFolio: {folio}\nTimer detenido.\n\nUse /chuleta para generar otro.")
@@ -636,7 +654,7 @@ async def keep_alive():
 async def lifespan(app: FastAPI):
     global _keep_task
     try:
-        inicializar_folio_desde_supabase()
+        await asyncio.to_thread(_sb_inicializar_folio)   # ← async
         await bot.delete_webhook(drop_pending_updates=True)
         if BASE_URL:
             wh = f"{BASE_URL}/webhook"
@@ -645,7 +663,7 @@ async def lifespan(app: FastAPI):
             _keep_task = asyncio.create_task(keep_alive())
         else:
             print("[POLLING] Sin webhook")
-        print("[SISTEMA] CDMX v7.0 iniciado!")
+        print("[SISTEMA] CDMX v7.1 iniciado!")
         yield
     except Exception as e:
         print(f"[ERROR CRITICO] {e}")
@@ -658,7 +676,7 @@ async def lifespan(app: FastAPI):
                 await _keep_task
         await bot.session.close()
 
-app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.0")
+app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.1")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -675,25 +693,24 @@ async def telegram_webhook(request: Request):
 async def health():
     return {
         "ok":            True,
-        "sistema":       "CDMX v7.0",
+        "sistema":       "CDMX v7.1",
         "vigencia":      f"{DIAS_PERMISO} dias fijos",
         "precio":        f"${PRECIO_PERMISO}",
         "timer":         "36 horas",
         "active_timers": len(timers_activos),
         "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
-        "fixes_v7": [
-            "30 dias fijos sin selector",
-            "dias_permiso y precio eliminados del INSERT (no existen en BD)",
-            "send_document con retry x3 cada 5s",
-            "timeout bot = 180s",
-            "PDF generado en background task"
+        "fixes_v7.1": [
+            "asyncio.to_thread() en PDF, QR y Supabase – sin bloqueo del event loop",
+            "obtener_siguiente_folio() ahora es async",
+            "_sb_inicializar_folio() en to_thread al arrancar",
+            "send_document con retry x3 cada 5s mantenido"
         ]
     }
 
 @app.get("/status")
 async def status_detail():
     return {
-        "sistema":         "CDMX v7.0",
+        "sistema":         "CDMX v7.1",
         "timers_activos":  len(timers_activos),
         "folios_activos":  list(timers_activos.keys()),
         "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
