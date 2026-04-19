@@ -197,7 +197,9 @@ def _generar_pdf_unificado(datos: dict) -> str:
     anio_str  = str(hoy.year)
 
     try:
-        # === PAGINA 1 ===
+        # =====================================================================
+        # PAGINA 1
+        # =====================================================================
         doc1  = fitz.open(PLANTILLA_PDF)
         page1 = doc1[0]
 
@@ -222,27 +224,23 @@ def _generar_pdf_unificado(datos: dict) -> str:
             page1.insert_image(fitz.Rect(49, 653, 145, 749), pixmap=qr_pix, overlay=True)
             print("[QR] Insertado en pagina 1")
 
-        # === PAGINA 2 ===
+        # =====================================================================
+        # PAGINA 2  ← mismas coordenadas explícitas (x, y) que página 1
+        # =====================================================================
         doc2  = fitz.open(PLANTILLA_BUENO)
         page2 = doc2[0]
 
-        X     = 135.02
-        Y_SER = 193.88
-
         titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS "
                   f"(PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
-        page2.insert_text((X, Y_SER - 10), titulo,
-                          fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((X, Y_SER),      datos["serie"],
-                          fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((X, Y_SER + 11), anio_str,
-                          fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((X, Y_SER + 22), f"${PRECIO_PERMISO}",
-                          fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"),
-                          fontsize=6, fontname="hebo", color=(0,0,0))
+        page2.insert_text((135, 184), titulo,                          fontsize=6, fontname="hebo", color=(0,0,0))
+        page2.insert_text((135, 194), datos["serie"],                  fontsize=6, fontname="hebo", color=(0,0,0))
+        page2.insert_text((135, 205), anio_str,                        fontsize=6, fontname="hebo", color=(0,0,0))
+        page2.insert_text((135, 216), f"${PRECIO_PERMISO}",            fontsize=6, fontname="hebo", color=(0,0,0))
+        page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"),        fontsize=6, fontname="hebo", color=(0,0,0))
 
-        # === UNIR ===
+        # =====================================================================
+        # UNIR PÁGINAS
+        # =====================================================================
         doc1.insert_pdf(doc2)
         doc2.close()
         doc1.save(filename)
@@ -446,7 +444,7 @@ async def get_nombre(message: types.Message, state: FSMContext):
     datos["username"] = message.from_user.username or "Sin username"
 
     try:
-        datos["folio"] = await obtener_siguiente_folio()   # ← async ahora
+        datos["folio"] = await obtener_siguiente_folio()
     except Exception as e:
         await message.answer(f"ERROR generando folio: {e}\n\nUse /chuleta")
         await state.clear()
@@ -654,7 +652,7 @@ async def keep_alive():
 async def lifespan(app: FastAPI):
     global _keep_task
     try:
-        await asyncio.to_thread(_sb_inicializar_folio)   # ← async
+        await asyncio.to_thread(_sb_inicializar_folio)
         await bot.delete_webhook(drop_pending_updates=True)
         if BASE_URL:
             wh = f"{BASE_URL}/webhook"
@@ -703,7 +701,8 @@ async def health():
             "asyncio.to_thread() en PDF, QR y Supabase – sin bloqueo del event loop",
             "obtener_siguiente_folio() ahora es async",
             "_sb_inicializar_folio() en to_thread al arrancar",
-            "send_document con retry x3 cada 5s mantenido"
+            "send_document con retry x3 cada 5s mantenido",
+            "pagina2: coordenadas explícitas (x, y) igual que pagina1"
         ]
     }
 
