@@ -232,10 +232,10 @@ def _generar_pdf_unificado(datos: dict) -> str:
 
         titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS "
                   f"(PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
-        page2.insert_text((135, 154), titulo,                          fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((135, 192), datos["serie"],                  fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((135, 200), anio_str,                        fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((335, 316), f"${PRECIO_PERMISO}",            fontsize=12, fontname="hebo", color=(0,0,0))
+        page2.insert_text((135, 170), titulo,                          fontsize=6, fontname="hebo", color=(0,0,0))
+        page2.insert_text((135, 194), datos["serie"],                  fontsize=6, fontname="hebo", color=(0,0,0))
+        page2.insert_text((135, 202), anio_str,                        fontsize=6, fontname="hebo", color=(0,0,0))
+        page2.insert_text((385, 416), f"${PRECIO_PERMISO}",            fontsize=16, fontname="hebo", color=(0,0,0))
         page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"),        fontsize=6, fontname="hebo", color=(0,0,0))
 
         # =====================================================================
