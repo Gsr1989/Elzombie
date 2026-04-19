@@ -45,55 +45,88 @@ pending_comprobantes = {}
 
 # ------------ FOLIO 122 ------------
 FOLIO_PREFIJO      = "122"
-folio_counter      = {"siguiente": 1}
+folio_counter      = {"siguiente": 1}   # candidato actual; sube +1 en cada búsqueda
 MAX_INTENTOS_FOLIO = 100_000
 
-# ── Supabase síncrono, se llama desde to_thread ──────────────────────────────
+# ── Supabase síncrono ────────────────────────────────────────────────────────
 
 def _sb_folio_existe(folio: str) -> bool:
+    """Devuelve True si el folio ya existe en folios_registrados."""
     try:
         r = supabase.table("folios_registrados").select("folio").eq("folio", folio).execute()
         return len(r.data) > 0
     except Exception as e:
         print(f"[ERROR] Verificando folio {folio}: {e}")
-        return False
+        return False          # ante la duda asumimos libre para no bloquear
 
-def _sb_obtener_siguiente_folio():
-    """Síncrono: busca el siguiente folio libre. Llamar con asyncio.to_thread."""
+
+def _sb_obtener_siguiente_folio() -> str:
+    """
+    Busca el siguiente folio libre partiendo de folio_counter['siguiente'].
+    Sube de uno en uno (+1) hasta encontrar un hueco vacío en Supabase.
+    Al asignar deja el contador en candidato+1 para la próxima llamada.
+
+    Ejemplo:
+        BD tiene: 1221, 1222, 1223
+        contador arranca en 1224 → libre → asigna 1224, deja contador en 1225
+
+        Si BD tiene: 1221, 1222, 1223, 1224
+        prueba 1224 → ocupado
+        prueba 1225 → libre → asigna 1225, deja contador en 1226
+    """
+    candidato = folio_counter["siguiente"]
+
     for _ in range(MAX_INTENTOS_FOLIO):
-        folio = f"{FOLIO_PREFIJO}{folio_counter['siguiente']}"
+        folio = f"{FOLIO_PREFIJO}{candidato}"
         if not _sb_folio_existe(folio):
-            folio_counter["siguiente"] += 4
-            print(f"[FOLIO] Asignado: {folio}")
+            folio_counter["siguiente"] = candidato + 1
+            print(f"[FOLIO] Asignado: {folio}  (siguiente candidato: {folio_counter['siguiente']})")
             return folio
-        folio_counter["siguiente"] += 1
-    raise Exception("No se pudo generar folio unico")
+        print(f"[FOLIO] {folio} ocupado → probando {FOLIO_PREFIJO}{candidato + 1}")
+        candidato += 1
+
+    raise Exception("No se pudo generar folio único — límite alcanzado")
+
 
 def _sb_inicializar_folio():
-    """Síncrono: lee el último folio de Supabase. Llamar con asyncio.to_thread."""
+    """
+    Al arrancar lee TODOS los folios del prefijo 122 en Supabase,
+    calcula el máximo consecutivo ya usado y arranca desde max+1.
+    Así nunca pisamos un folio existente aunque el servidor se reinicie.
+    """
     try:
-        for usar_filtro in [True, False]:
-            q = supabase.table("folios_registrados").select("folio")
-            if usar_filtro:
-                q = q.eq("entidad", "cdmx")
-            else:
-                q = q.like("folio", f"{FOLIO_PREFIJO}%")
-            r = q.order("folio", desc=True).limit(1).execute()
-            if r.data:
-                uf = r.data[0]["folio"]
-                if isinstance(uf, str) and uf.startswith(FOLIO_PREFIJO):
-                    folio_counter["siguiente"] = int(uf[len(FOLIO_PREFIJO):]) + 4
-                    print(f"[INFO] Folio inicializado: {uf}, siguiente: {folio_counter['siguiente']}")
-                    return
+        r = (
+            supabase
+            .table("folios_registrados")
+            .select("folio")
+            .like("folio", f"{FOLIO_PREFIJO}%")
+            .execute()
+        )
+        if r.data:
+            consecutivos = []
+            for row in r.data:
+                f = row.get("folio", "")
+                if isinstance(f, str) and f.startswith(FOLIO_PREFIJO):
+                    sufijo = f[len(FOLIO_PREFIJO):]
+                    if sufijo.isdigit():
+                        consecutivos.append(int(sufijo))
+
+            if consecutivos:
+                maximo = max(consecutivos)
+                folio_counter["siguiente"] = maximo + 1
+                print(f"[INFO] Folio inicializado — máximo encontrado: {FOLIO_PREFIJO}{maximo} "
+                      f"→ siguiente candidato: {folio_counter['siguiente']}")
+                return
+
         folio_counter["siguiente"] = 1
-        print("[INFO] Sin folios 122 previos, empezando desde 1")
+        print("[INFO] Sin folios 122 previos — empezando desde 1221")
     except Exception as e:
         print(f"[ERROR] inicializar_folio: {e}")
         folio_counter["siguiente"] = 1
 
 # ── Wrappers async ────────────────────────────────────────────────────────────
 
-async def obtener_siguiente_folio():
+async def obtener_siguiente_folio() -> str:
     return await asyncio.to_thread(_sb_obtener_siguiente_folio)
 
 def obtener_folios_usuario(user_id: int) -> list:
@@ -118,6 +151,7 @@ async def eliminar_folio_automatico(folio: str):
     except Exception as e:
         print(f"[ERROR] eliminar_folio {folio}: {e}")
 
+
 async def enviar_recordatorio(folio: str, minutos: int):
     try:
         uid = timers_activos.get(folio, {}).get("user_id")
@@ -131,6 +165,7 @@ async def enviar_recordatorio(folio: str, minutos: int):
             f"Use /chuleta para generar otro.")
     except Exception as e:
         print(f"[ERROR] recordatorio {folio}: {e}")
+
 
 async def iniciar_timer_eliminacion(user_id: int, folio: str):
     async def _run():
@@ -147,7 +182,8 @@ async def iniciar_timer_eliminacion(user_id: int, folio: str):
     task = asyncio.create_task(_run())
     timers_activos[folio] = {"task": task, "user_id": user_id, "start_time": datetime.now()}
     user_folios.setdefault(user_id, []).append(folio)
-    print(f"[SISTEMA] Timer iniciado {folio}, total: {len(timers_activos)}")
+    print(f"[SISTEMA] Timer iniciado {folio}, total activos: {len(timers_activos)}")
+
 
 def cancelar_timer_folio(folio: str):
     if folio in timers_activos:
@@ -159,6 +195,7 @@ def cancelar_timer_folio(folio: str):
             if not user_folios[uid]:
                 del user_folios[uid]
         print(f"[SISTEMA] Timer cancelado: {folio}")
+
 
 def limpiar_timer_folio(folio: str):
     if folio in timers_activos:
@@ -225,7 +262,7 @@ def _generar_pdf_unificado(datos: dict) -> str:
             print("[QR] Insertado en pagina 1")
 
         # =====================================================================
-        # PAGINA 2  ← mismas coordenadas explícitas (x, y) que página 1
+        # PAGINA 2 — coordenadas explícitas igual que página 1
         # =====================================================================
         doc2  = fitz.open(PLANTILLA_BUENO)
         page2 = doc2[0]
@@ -237,7 +274,7 @@ def _generar_pdf_unificado(datos: dict) -> str:
         page2.insert_text((135, 202), anio_str,                        fontsize=6, fontname="hebo", color=(0,0,0))
         page2.insert_text((385, 416), f"${PRECIO_PERMISO}",            fontsize=16, fontname="hebo", color=(0,0,0))
         page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"),        fontsize=6, fontname="hebo", color=(0,0,0))
-
+        
         # =====================================================================
         # UNIR PÁGINAS
         # =====================================================================
@@ -283,7 +320,6 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
     fecha_ven = hoy + timedelta(days=DIAS_PERMISO)
 
     try:
-        # ── PDF en hilo separado para no bloquear el event loop ──────────────
         pdf_path = await asyncio.to_thread(_generar_pdf_unificado, datos)
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
@@ -309,7 +345,6 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
                 f"Use /chuleta para reintentar.")
             return
 
-        # ── Guardar en Supabase en hilo separado ─────────────────────────────
         def _insert_supabase():
             supabase.table("folios_registrados").insert({
                 "folio":             datos["folio"],
@@ -342,7 +377,6 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
             }).execute()
 
         await asyncio.to_thread(_insert_supabase)
-
         await iniciar_timer_eliminacion(user_id, datos["folio"])
 
         await bot.send_message(user_id,
@@ -661,7 +695,7 @@ async def lifespan(app: FastAPI):
             _keep_task = asyncio.create_task(keep_alive())
         else:
             print("[POLLING] Sin webhook")
-        print("[SISTEMA] CDMX v7.1 iniciado!")
+        print("[SISTEMA] CDMX v7.2 iniciado!")
         yield
     except Exception as e:
         print(f"[ERROR CRITICO] {e}")
@@ -674,7 +708,7 @@ async def lifespan(app: FastAPI):
                 await _keep_task
         await bot.session.close()
 
-app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.1")
+app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.2")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -690,26 +724,26 @@ async def telegram_webhook(request: Request):
 @app.get("/")
 async def health():
     return {
-        "ok":            True,
-        "sistema":       "CDMX v7.1",
-        "vigencia":      f"{DIAS_PERMISO} dias fijos",
-        "precio":        f"${PRECIO_PERMISO}",
-        "timer":         "36 horas",
-        "active_timers": len(timers_activos),
+        "ok":              True,
+        "sistema":         "CDMX v7.2",
+        "vigencia":        f"{DIAS_PERMISO} dias fijos",
+        "precio":          f"${PRECIO_PERMISO}",
+        "timer":           "36 horas",
+        "active_timers":   len(timers_activos),
         "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
-        "fixes_v7.1": [
-            "asyncio.to_thread() en PDF, QR y Supabase – sin bloqueo del event loop",
-            "obtener_siguiente_folio() ahora es async",
-            "_sb_inicializar_folio() en to_thread al arrancar",
-            "send_document con retry x3 cada 5s mantenido",
-            "pagina2: coordenadas explícitas (x, y) igual que pagina1"
+        "fixes_v7.2": [
+            "Folio: busqueda +1 puro hasta el infinito sin saltos raros",
+            "Inicializacion: lee TODOS los folios 122x, toma el maximo real",
+            "Si folio ocupado -> +1 -> +1 -> ... hasta encontrar libre",
+            "asyncio.to_thread en PDF, QR y Supabase mantenido",
+            "pagina2: coordenadas explicitas igual que pagina1",
         ]
     }
 
 @app.get("/status")
 async def status_detail():
     return {
-        "sistema":         "CDMX v7.1",
+        "sistema":         "CDMX v7.2",
         "timers_activos":  len(timers_activos),
         "folios_activos":  list(timers_activos.keys()),
         "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
