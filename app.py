@@ -1,216 +1,182 @@
-from datetime import datetime, timedelta
+from flask import Flask, render_template, render_template_string, request, redirect, \
+    url_for, flash, session, send_file, abort, jsonify, Response
+from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 from supabase import create_client, Client
 import fitz
 import os
-from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command
-from aiogram.types import FSInputFile, ContentType, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.client.session.aiohttp import AiohttpSession
-from contextlib import asynccontextmanager, suppress
-import asyncio
-import aiohttp
 import qrcode
+from PIL import Image
+from io import BytesIO, StringIO
+import csv
+import re
+import logging
+import sys
 
-# ------------ CONFIG ------------
-BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-BASE_URL     = os.getenv("BASE_URL", "").rstrip("/")
-OUTPUT_DIR   = "documentos"
-PLANTILLA_PDF   = "cdmxdigital2025ppp.pdf"
-PLANTILLA_BUENO = "elbueno.pdf"
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-PRECIO_PERMISO = 374
-DIAS_PERMISO   = 30
+# ===================== LOGGING =====================
+sys.dont_write_bytecode = True
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# ===================== ZONA HORARIA =====================
+TZ_CDMX = ZoneInfo("America/Mexico_City")
+
+def now_cdmx() -> datetime:
+    return datetime.now(TZ_CDMX)
+
+def today_cdmx() -> date:
+    return now_cdmx().date()
+
+def parse_date_any(value) -> date:
+    if not value:
+        raise ValueError("Fecha vacía")
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=TZ_CDMX)
+        else:
+            value = value.astimezone(TZ_CDMX)
+        return value.date()
+    s = str(value).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return date.fromisoformat(s)
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ_CDMX)
+    else:
+        dt = dt.astimezone(TZ_CDMX)
+    return dt.date()
+
+# ===================== FLASK CONFIG =====================
+app = Flask(__name__)
+app.secret_key = 'clave_muy_segura_123456'
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=2, x_proto=2, x_host=2, x_prefix=1)
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=False,
+    SESSION_COOKIE_HTTPONLY=True,
+    MAX_CONTENT_LENGTH=32 * 1024 * 1024,
+    SEND_FILE_MAX_AGE_DEFAULT=0,
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=24)
+)
+
+# ===================== SUPABASE CONFIG =====================
+SUPABASE_URL = "https://xsagwqepoljfsogusubw.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzYWd3cWVwb2xqZnNvZ3VzdWJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDM5NjM3NTUsImV4cCI6MjA1OTUzOTc1NX0.NUixULn0m2o49At8j6X58UqbXre2O2_JStqzls_8Gws"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ===================== CONFIG GENERAL =====================
+OUTPUT_DIR           = "documentos"
+PLANTILLA_PRINCIPAL  = "cdmxdigital2025ppp.pdf"
+PLANTILLA_SECUNDARIA = "elbueno.pdf"
+URL_CONSULTA_BASE    = "https://semovidigitalgob.onrender.com"
+ENTIDAD              = "cdmx"
+PRECIO_PERMISO       = 374
+DIAS_PERMISO         = 30
+PAGE_SIZE            = 100   # registros por página en admin_tabla
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ------------ SUPABASE ------------
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# ===================== FOLIOS CDMX =====================
+PREFIJO_CDMX = "412"
 
-# ------------ BOT (timeout 180s) ------------
-_bot_session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=180))
-bot     = Bot(token=BOT_TOKEN, session=_bot_session)
-storage = MemoryStorage()
-dp      = Dispatcher(storage=storage)
+def generar_folio_automatico_cdmx():
+    todos = supabase.table("folios_registrados")\
+        .select("folio").like("folio", f"{PREFIJO_CDMX}%").execute().data or []
 
-# ------------ TIMERS ------------
-timers_activos       = {}
-user_folios          = {}
-pending_comprobantes = {}
+    consecutivos = []
+    for f in todos:
+        s = str(f.get('folio', ''))
+        if s.startswith(PREFIJO_CDMX) and s[len(PREFIJO_CDMX):].isdigit():
+            consecutivos.append(int(s[len(PREFIJO_CDMX):]))
 
-# ------------ FOLIO 122 ------------
-FOLIO_PREFIJO      = "122"
-folio_counter      = {"siguiente": 1}   # candidato actual; sube +1 en cada búsqueda
-MAX_INTENTOS_FOLIO = 100_000
+    siguiente = (max(consecutivos) + 1) if consecutivos else 1
+    logger.info(f"[FOLIO] siguiente candidato: {PREFIJO_CDMX}{siguiente}")
 
-# ── Supabase síncrono ────────────────────────────────────────────────────────
+    for intento in range(10_000_000):
+        candidato = f"{PREFIJO_CDMX}{siguiente + intento}"
+        existe = supabase.table("folios_registrados")\
+            .select("folio").eq("folio", candidato).limit(1).execute().data
+        if not existe:
+            logger.info(f"[FOLIO] ✅ {candidato} (intento {intento+1})")
+            return candidato
+        if intento and intento % 10_000 == 0:
+            logger.info(f"[FOLIO] buscando... intento {intento}")
 
-def _sb_folio_existe(folio: str) -> bool:
-    """Devuelve True si el folio ya existe en folios_registrados."""
+    raise Exception("Sin folio disponible tras 10,000,000 intentos")
+
+
+def guardar_folio_con_reintento(datos, username):
+    fexp_date = parse_date_any(datos["fecha_exp"])
+    fven_date = parse_date_any(datos["fecha_ven"])
+
+    def _row(folio):
+        return {
+            "folio":             folio,
+            "marca":             datos["marca"],
+            "linea":             datos["linea"],
+            "anio":              datos["anio"],
+            "numero_serie":      datos["numero_serie"],
+            "numero_motor":      datos["numero_motor"],
+            "nombre":            datos.get("nombre", "SIN NOMBRE"),
+            "fecha_expedicion":  fexp_date.isoformat(),
+            "fecha_vencimiento": fven_date.isoformat(),
+            "entidad":           ENTIDAD,
+            "estado":            "ACTIVO",
+            "creado_por":        username
+        }
+
+    # MANUAL
+    if datos.get("folio") and str(datos["folio"]).strip():
+        fm = str(datos["folio"]).strip()
+        try:
+            supabase.table("folios_registrados").insert(_row(fm)).execute()
+            datos["folio"] = fm
+            logger.info(f"[DB] ✅ Folio MANUAL {fm}")
+            return True
+        except Exception as e:
+            em = str(e).lower()
+            if any(k in em for k in ("duplicate", "unique", "23505")):
+                logger.error(f"[ERROR] Folio {fm} YA EXISTE")
+            else:
+                logger.error(f"[ERROR BD] {e}")
+            return False
+
+    # AUTO +1
     try:
-        r = supabase.table("folios_registrados").select("folio").eq("folio", folio).execute()
-        return len(r.data) > 0
+        base = generar_folio_automatico_cdmx()
     except Exception as e:
-        print(f"[ERROR] Verificando folio {folio}: {e}")
-        return False          # ante la duda asumimos libre para no bloquear
+        logger.error(f"[ERROR] {e}")
+        return False
 
+    num = int(base[len(PREFIJO_CDMX):]) if base[len(PREFIJO_CDMX):].isdigit() else 1
 
-def _sb_obtener_siguiente_folio() -> str:
-    """
-    Busca el siguiente folio libre partiendo de folio_counter['siguiente'].
-    Sube de uno en uno (+1) hasta encontrar un hueco vacío en Supabase.
-    Al asignar deja el contador en candidato+1 para la próxima llamada.
+    for intento in range(10_000_000):
+        c = f"{PREFIJO_CDMX}{num + intento}"
+        try:
+            supabase.table("folios_registrados").insert(_row(c)).execute()
+            datos["folio"] = c
+            logger.info(f"[DB] ✅ Folio AUTO {c} (intento {intento+1})")
+            return True
+        except Exception as e:
+            em = str(e).lower()
+            if any(k in em for k in ("duplicate", "unique", "23505")):
+                continue
+            logger.error(f"[ERROR BD] {e}")
+            return False
 
-    Ejemplo:
-        BD tiene: 1221, 1222, 1223
-        contador arranca en 1224 → libre → asigna 1224, deja contador en 1225
+    logger.error("[ERROR] Sin folio tras 10,000,000 intentos")
+    return False
 
-        Si BD tiene: 1221, 1222, 1223, 1224
-        prueba 1224 → ocupado
-        prueba 1225 → libre → asigna 1225, deja contador en 1226
-    """
-    candidato = folio_counter["siguiente"]
-
-    for _ in range(MAX_INTENTOS_FOLIO):
-        folio = f"{FOLIO_PREFIJO}{candidato}"
-        if not _sb_folio_existe(folio):
-            folio_counter["siguiente"] = candidato + 1
-            print(f"[FOLIO] Asignado: {folio}  (siguiente candidato: {folio_counter['siguiente']})")
-            return folio
-        print(f"[FOLIO] {folio} ocupado → probando {FOLIO_PREFIJO}{candidato + 1}")
-        candidato += 1
-
-    raise Exception("No se pudo generar folio único — límite alcanzado")
-
-
-def _sb_inicializar_folio():
-    """
-    Al arrancar lee TODOS los folios del prefijo 122 en Supabase,
-    calcula el máximo consecutivo ya usado y arranca desde max+1.
-    Así nunca pisamos un folio existente aunque el servidor se reinicie.
-    """
-    try:
-        r = (
-            supabase
-            .table("folios_registrados")
-            .select("folio")
-            .like("folio", f"{FOLIO_PREFIJO}%")
-            .execute()
-        )
-        if r.data:
-            consecutivos = []
-            for row in r.data:
-                f = row.get("folio", "")
-                if isinstance(f, str) and f.startswith(FOLIO_PREFIJO):
-                    sufijo = f[len(FOLIO_PREFIJO):]
-                    if sufijo.isdigit():
-                        consecutivos.append(int(sufijo))
-
-            if consecutivos:
-                maximo = max(consecutivos)
-                folio_counter["siguiente"] = maximo + 1
-                print(f"[INFO] Folio inicializado — máximo encontrado: {FOLIO_PREFIJO}{maximo} "
-                      f"→ siguiente candidato: {folio_counter['siguiente']}")
-                return
-
-        folio_counter["siguiente"] = 1
-        print("[INFO] Sin folios 122 previos — empezando desde 1221")
-    except Exception as e:
-        print(f"[ERROR] inicializar_folio: {e}")
-        folio_counter["siguiente"] = 1
-
-# ── Wrappers async ────────────────────────────────────────────────────────────
-
-async def obtener_siguiente_folio() -> str:
-    return await asyncio.to_thread(_sb_obtener_siguiente_folio)
-
-def obtener_folios_usuario(user_id: int) -> list:
-    return user_folios.get(user_id, [])
-
-# ------------ TIMERS ------------
-async def eliminar_folio_automatico(folio: str):
-    try:
-        uid = timers_activos.get(folio, {}).get("user_id")
-        await asyncio.to_thread(
-            lambda: supabase.table("folios_registrados").delete().eq("folio", folio).execute()
-        )
-        await asyncio.to_thread(
-            lambda: supabase.table("borradores_registros").delete().eq("folio", folio).execute()
-        )
-        if uid:
-            await bot.send_message(uid,
-                f"TIEMPO AGOTADO - CDMX\n\n"
-                f"Folio {folio} eliminado por no pagar en 36h.\n\n"
-                f"Use /chuleta para generar otro.")
-        limpiar_timer_folio(folio)
-    except Exception as e:
-        print(f"[ERROR] eliminar_folio {folio}: {e}")
-
-
-async def enviar_recordatorio(folio: str, minutos: int):
-    try:
-        uid = timers_activos.get(folio, {}).get("user_id")
-        if not uid:
-            return
-        await bot.send_message(uid,
-            f"RECORDATORIO - CDMX\n\n"
-            f"Folio: {folio}\nTiempo restante: {minutos} min\n"
-            f"Monto: ${PRECIO_PERMISO}\n\n"
-            f"Envie comprobante de pago.\n\n"
-            f"Use /chuleta para generar otro.")
-    except Exception as e:
-        print(f"[ERROR] recordatorio {folio}: {e}")
-
-
-async def iniciar_timer_eliminacion(user_id: int, folio: str):
-    async def _run():
-        print(f"[TIMER] 36h iniciado - folio {folio}")
-        await asyncio.sleep(34.5 * 3600)
-        for mins, sleep_seg in [(90, 1800), (60, 1800), (30, 1200), (10, 600)]:
-            if folio not in timers_activos:
-                return
-            await enviar_recordatorio(folio, mins)
-            await asyncio.sleep(sleep_seg)
-        if folio in timers_activos:
-            await eliminar_folio_automatico(folio)
-
-    task = asyncio.create_task(_run())
-    timers_activos[folio] = {"task": task, "user_id": user_id, "start_time": datetime.now()}
-    user_folios.setdefault(user_id, []).append(folio)
-    print(f"[SISTEMA] Timer iniciado {folio}, total activos: {len(timers_activos)}")
-
-
-def cancelar_timer_folio(folio: str):
-    if folio in timers_activos:
-        timers_activos[folio]["task"].cancel()
-        uid = timers_activos[folio]["user_id"]
-        del timers_activos[folio]
-        if uid in user_folios:
-            user_folios[uid] = [f for f in user_folios[uid] if f != folio]
-            if not user_folios[uid]:
-                del user_folios[uid]
-        print(f"[SISTEMA] Timer cancelado: {folio}")
-
-
-def limpiar_timer_folio(folio: str):
-    if folio in timers_activos:
-        uid = timers_activos[folio]["user_id"]
-        del timers_activos[folio]
-        if uid in user_folios:
-            user_folios[uid] = [f for f in user_folios[uid] if f != folio]
-            if not user_folios[uid]:
-                del user_folios[uid]
-
-# ------------ QR ------------
-URL_CONSULTA_BASE = "https://semovidigitalgob.onrender.com"
-
-def _generar_qr_cdmx(folio: str):
-    """Síncrono – llamar con asyncio.to_thread."""
+# ===================== QR / PDF =====================
+def generar_qr_dinamico_cdmx(folio):
     try:
         url = f"{URL_CONSULTA_BASE}/consulta/{folio}"
         qr  = qrcode.QRCode(version=2, error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -218,539 +184,954 @@ def _generar_qr_cdmx(folio: str):
         qr.add_data(url)
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        print(f"[QR] {folio} -> {url}")
-        return img
+        return img, url
     except Exception as e:
-        print(f"[ERROR QR] {e}")
-        return None
+        logger.error(f"[QR] {e}")
+        return None, None
 
-# ------------ GENERACION PDF (síncrono, llamar con to_thread) ----------------
 
-def _generar_pdf_unificado(datos: dict) -> str:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    filename  = f"{OUTPUT_DIR}/{datos['folio']}_completo.pdf"
-    hoy       = datos["fecha_obj"]
-    fecha_ven = hoy + timedelta(days=DIAS_PERMISO)
-    anio_str  = str(hoy.year)
+def generar_pdf_unificado_cdmx(datos: dict) -> str:
+    fol          = datos["folio"]
+    fecha_exp_dt = datos["fecha_exp"]
+    fecha_ven_dt = datos["fecha_ven"]
+
+    if fecha_exp_dt.tzinfo is None:
+        fecha_exp_dt = fecha_exp_dt.replace(tzinfo=TZ_CDMX)
+    else:
+        fecha_exp_dt = fecha_exp_dt.astimezone(TZ_CDMX)
+
+    if isinstance(fecha_ven_dt, str):
+        fecha_ven_str = fecha_ven_dt
+    else:
+        if fecha_ven_dt.tzinfo is None:
+            fecha_ven_dt = fecha_ven_dt.replace(tzinfo=TZ_CDMX)
+        else:
+            fecha_ven_dt = fecha_ven_dt.astimezone(TZ_CDMX)
+        fecha_ven_str = fecha_ven_dt.strftime("%d/%m/%Y")
+
+    out = os.path.join(OUTPUT_DIR, f"{fol}.pdf")
 
     try:
-        # =====================================================================
-        # PAGINA 1
-        # =====================================================================
-        doc1  = fitz.open(PLANTILLA_PDF)
-        page1 = doc1[0]
+        # ── PÁGINA 1 ──────────────────────────────────────────────────────────
+        doc1 = fitz.open(PLANTILLA_PRINCIPAL)
+        pg1  = doc1[0]
 
-        page1.insert_text((50,  130), "FOLIO: ",                     fontsize=12, color=(0,0,0))
-        page1.insert_text((100, 130), datos["folio"],                 fontsize=12, color=(1,0,0))
-        page1.insert_text((130, 145), datos["fecha"],                 fontsize=12, color=(0,0,0))
-        page1.insert_text((87,  290), datos["marca"],                 fontsize=11, color=(0,0,0))
-        page1.insert_text((375, 290), datos["serie"],                 fontsize=11, color=(0,0,0))
-        page1.insert_text((87,  307), datos["linea"],                 fontsize=11, color=(0,0,0))
-        page1.insert_text((375, 307), datos["motor"],                 fontsize=11, color=(0,0,0))
-        page1.insert_text((87,  323), datos["anio"],                  fontsize=11, color=(0,0,0))
-        page1.insert_text((375, 323), fecha_ven.strftime("%d/%m/%Y"), fontsize=11, color=(0,0,0))
-        page1.insert_text((375, 340), datos["nombre"],                fontsize=11, color=(0,0,0))
+        meses = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",
+                 7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
+        fecha_texto = f"{fecha_exp_dt.day} de {meses[fecha_exp_dt.month]} del {fecha_exp_dt.year}"
 
-        img_qr = _generar_qr_cdmx(datos["folio"])
+        pg1.insert_text((50,  130), "FOLIO: ",             fontsize=12, fontname="helv", color=(0,0,0))
+        pg1.insert_text((100, 130), fol,                   fontsize=12, fontname="helv", color=(1,0,0))
+        pg1.insert_text((130, 145), fecha_texto,           fontsize=12, fontname="helv", color=(0,0,0))
+        pg1.insert_text((87,  290), datos["marca"],        fontsize=11, fontname="helv", color=(0,0,0))
+        pg1.insert_text((375, 290), datos["numero_serie"], fontsize=11, fontname="helv", color=(0,0,0))
+        pg1.insert_text((87,  307), datos["linea"],        fontsize=11, fontname="helv", color=(0,0,0))
+        pg1.insert_text((375, 307), datos["numero_motor"], fontsize=11, fontname="helv", color=(0,0,0))
+        pg1.insert_text((87,  323), str(datos["anio"]),    fontsize=11, fontname="helv", color=(0,0,0))
+        pg1.insert_text((375, 323), fecha_ven_str,         fontsize=11, fontname="helv", color=(0,0,0))
+        if datos.get("nombre"):
+            pg1.insert_text((375, 340), datos["nombre"],   fontsize=11, fontname="helv", color=(0,0,0))
+
+        img_qr, _ = generar_qr_dinamico_cdmx(fol)
         if img_qr:
-            from io import BytesIO
             buf = BytesIO()
             img_qr.save(buf, format="PNG")
             buf.seek(0)
-            qr_pix = fitz.Pixmap(buf.read())
-            page1.insert_image(fitz.Rect(49, 653, 145, 749), pixmap=qr_pix, overlay=True)
-            print("[QR] Insertado en pagina 1")
+            pg1.insert_image(fitz.Rect(49, 653, 145, 749),
+                             pixmap=fitz.Pixmap(buf.read()), overlay=True)
 
-        # =====================================================================
-        # PAGINA 2 — coordenadas explícitas igual que página 1
-        # =====================================================================
-        doc2  = fitz.open(PLANTILLA_BUENO)
-        page2 = doc2[0]
+        # ── PÁGINA 2 ──────────────────────────────────────────────────────────
+        if os.path.exists(PLANTILLA_SECUNDARIA):
+            doc2 = fitz.open(PLANTILLA_SECUNDARIA)
+            pg2  = doc2[0]
 
-        titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS "
-                  f"(PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
-        page2.insert_text((135, 170), titulo,                          fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((135, 194), datos["serie"],                  fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((135, 202), anio_str,                        fontsize=6, fontname="hebo", color=(0,0,0))
-        page2.insert_text((385, 433), f"${PRECIO_PERMISO}",            fontsize=16, fontname="hebo", color=(0,0,0))
-        page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"),        fontsize=6, fontname="hebo", color=(0,0,0))
-        
-        # =====================================================================
-        # UNIR PÁGINAS
-        # =====================================================================
-        doc1.insert_pdf(doc2)
-        doc2.close()
-        doc1.save(filename)
+            titulo_p2 = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS "
+                         f"(PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
+            anio_str  = str(datos["anio"])
+
+            pg2.insert_text((135, 170), titulo_p2,                          fontsize=6,  fontname="hebo", color=(0,0,0))
+            pg2.insert_text((135, 194), datos["numero_serie"],               fontsize=6,  fontname="hebo", color=(0,0,0))
+            pg2.insert_text((135, 202), anio_str,                            fontsize=6,  fontname="hebo", color=(0,0,0))
+            pg2.insert_text((385, 411), f"${PRECIO_PERMISO}",               fontsize=16, fontname="hebo", color=(0,0,0))
+            pg2.insert_text((190, 324), fecha_exp_dt.strftime('%d/%m/%Y'),   fontsize=6,  fontname="hebo", color=(0,0,0))
+
+            doc1.insert_pdf(doc2)
+            doc2.close()
+
+        doc1.save(out)
         doc1.close()
-
-        print(f"[PDF] Generado: {filename}")
+        logger.info(f"[PDF] ✅ {out}")
 
     except Exception as e:
-        print(f"[ERROR PDF] {e}")
+        logger.error(f"[PDF ERROR] {e}")
         fb = fitz.open()
-        fb.new_page().insert_text((50, 50), f"ERROR - {datos['folio']}", fontsize=12)
-        fb.save(filename)
+        fb.new_page().insert_text((50, 50), f"ERROR - {fol}", fontsize=12)
+        fb.save(out)
         fb.close()
 
-    return filename
+    return out
 
-# ------------ SEND CON RETRY ------------
-async def send_document_con_retry(chat_id: int, path: str, caption: str,
-                                   reply_markup, reintentos: int = 3) -> bool:
-    for intento in range(1, reintentos + 1):
-        try:
-            await bot.send_document(
-                chat_id,
-                FSInputFile(path),
-                caption=caption,
-                reply_markup=reply_markup
-            )
-            print(f"[SEND] Documento enviado (intento {intento})")
-            return True
-        except Exception as e:
-            print(f"[SEND] Intento {intento} fallido: {e}")
-            if intento < reintentos:
-                await asyncio.sleep(5)
-    return False
+# ===================== TABLAS DISPONIBLES =====================
+TABLAS_DISPONIBLES = {
+    'folios_registrados': {
+        'nombre':        'Folios Registrados',
+        'pk_col':        'folio',
+        'search_cols':   ['folio', 'marca', 'linea', 'numero_serie', 'numero_motor',
+                          'nombre', 'estado', 'creado_por', 'entidad'],
+    },
+    'verificaciondigitalcdmx': {
+        'nombre':      'Usuarios del Sistema',
+        'pk_col':      'id',
+        'search_cols': ['username', 'password'],
+    }
+}
 
-# ------------ BACKGROUND: genera y manda PDF ---------------------------------
-async def generar_y_enviar_background(chat_id: int, datos: dict):
-    user_id   = datos["user_id"]
-    hoy       = datos["fecha_obj"]
-    fecha_ven = hoy + timedelta(days=DIAS_PERMISO)
+# ===================== TEMPLATE TABLA — celdas como texto, input solo al hacer click ===
+TABLE_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ info_tabla.nombre }}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Courier New',monospace;background:#0d0d0d;color:#e2e8f0;min-height:100vh;font-size:12px}
+a{text-decoration:none}
+header{background:#111827;border-bottom:1px solid #1f2937;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:300;gap:8px;flex-wrap:wrap}
+.title{font-size:12px;font-weight:700;letter-spacing:2px;color:#f1f5f9}
+.dot{width:7px;height:7px;border-radius:50%;background:#10b981;box-shadow:0 0 6px #10b981;display:inline-block;margin-right:8px;flex-shrink:0}
+.hbtns{display:flex;gap:6px;flex-shrink:0}
+.btn{background:transparent;border:1px solid #374151;color:#9ca3af;border-radius:5px;padding:6px 12px;cursor:pointer;font-size:10px;font-family:inherit;letter-spacing:1px;white-space:nowrap;transition:all .15s}
+.btn:hover{border-color:#6b7280;color:#e2e8f0}
+.btn-blue{border-color:#1d4ed8;color:#60a5fa}
+.btn-blue:hover{background:#1e3a5f}
 
-    try:
-        pdf_path = await asyncio.to_thread(_generar_pdf_unificado, datos)
+/* ── BARRA BÚSQUEDA ── */
+.bar{display:flex;gap:8px;align-items:center;padding:10px 16px;background:#0d1117;border-bottom:1px solid #1f2937;flex-wrap:wrap}
+.sbox{flex:1;min-width:200px;background:#1f2937;border:1px solid #374151;color:#e2e8f0;border-radius:5px;padding:8px 12px;font-family:inherit;font-size:12px;outline:none;transition:border .2s}
+.sbox:focus{border-color:#3b82f6}
+.sbox::placeholder{color:#4b5563}
+.sbtn{background:#1d4ed8;border:none;color:#fff;border-radius:5px;padding:8px 16px;cursor:pointer;font-family:inherit;font-size:11px;letter-spacing:1px;white-space:nowrap}
+.sbtn:hover{background:#2563eb}
+.counter{font-size:10px;color:#6b7280;white-space:nowrap}
+.clear-btn{color:#6b7280;font-size:11px;cursor:pointer;background:none;border:none;font-family:inherit;padding:4px 8px}
+.clear-btn:hover{color:#e2e8f0}
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Validar Admin",  callback_data=f"validar_{datos['folio']}"),
-            InlineKeyboardButton(text="Detener Timer",  callback_data=f"detener_{datos['folio']}")
-        ]])
+/* ── TABLA ── */
+.wrap{overflow-x:auto;padding:0 0 80px}
+table{width:100%;border-collapse:collapse;table-layout:auto}
+thead th{background:#1f2937;color:#6b7280;padding:8px 8px;text-align:left;font-size:10px;letter-spacing:1px;font-weight:700;border-bottom:1px solid #374151;white-space:nowrap;position:sticky;top:0;z-index:100}
+tbody tr:nth-child(odd){background:#111827}
+tbody tr:nth-child(even){background:#0d0d0d}
+tbody tr:hover{background:#1a2335}
+td{padding:5px 6px;border-bottom:1px solid #0d1117;vertical-align:middle;white-space:nowrap}
+.num{color:#374151;font-size:10px;user-select:none;min-width:28px;text-align:center}
 
-        caption = (
-            f"PERMISO DE CIRCULACION - CDMX\n"
-            f"Folio: {datos['folio']}\n"
-            f"Vigencia: {DIAS_PERMISO} dias ({fecha_ven.strftime('%d/%m/%Y')})\n"
-            f"Monto: ${PRECIO_PERMISO}\n\n"
-            f"Documento con 2 paginas\n"
-            f"TIMER ACTIVO (36 horas)"
-        )
+/* ── CELDA ── */
+.cv{display:block;min-width:70px;max-width:220px;overflow:hidden;text-overflow:ellipsis;color:#9ca3af;cursor:text;padding:3px 5px;border-radius:3px;border:1px solid transparent}
+.cv:hover{border-color:#374151;background:#1f2937}
+.cv.folio{color:#fbbf24}
+.cv.estado{color:#f59e0b}
+.cv.nombre,.cv.contribuyente,.cv.username{color:#e2e8f0}
+.cv.null-val{color:#374151;font-style:italic}
 
-        ok = await send_document_con_retry(chat_id, pdf_path, caption, keyboard)
+/* ── INPUT (solo aparece al editar) ── */
+.cell-input{background:#1e3a5f;border:1px solid #3b82f6;color:#93c5fd;border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit;min-width:120px;max-width:280px;outline:none}
+.cell-input.saving{background:#064e3b;border-color:#10b981;color:#6ee7b7}
+.cell-input.err{background:#7f1d1d;border-color:#ef4444;color:#fca5a5}
 
-        if not ok:
-            await bot.send_message(user_id,
-                f"No se pudo enviar el documento (fallo de red).\n"
-                f"Folio generado: {datos['folio']}\n"
-                f"Use /chuleta para reintentar.")
-            return
+/* ── BOTÓN DEL ── */
+.del-btn{background:transparent;border:1px solid #374151;color:#ef4444;border-radius:4px;padding:3px 7px;cursor:pointer;font-size:10px;font-family:inherit}
+.del-btn:hover{background:#7f1d1d}
 
-        def _insert_supabase():
-            supabase.table("folios_registrados").insert({
-                "folio":             datos["folio"],
-                "marca":             datos["marca"],
-                "linea":             datos["linea"],
-                "anio":              datos["anio"],
-                "numero_serie":      datos["serie"],
-                "numero_motor":      datos["motor"],
-                "nombre":            datos["nombre"],
-                "fecha_expedicion":  hoy.date().isoformat(),
-                "fecha_vencimiento": fecha_ven.date().isoformat(),
-                "entidad":           "cdmx",
-                "estado":            "PENDIENTE",
-                "user_id":           user_id,
-                "username":          datos.get("username", "Sin username"),
+/* ── PAGINACIÓN ── */
+.pag{display:flex;gap:8px;align-items:center;justify-content:center;padding:16px;border-top:1px solid #1f2937;background:#0d1117;position:sticky;bottom:0}
+.pag a{background:transparent;border:1px solid #374151;color:#9ca3af;border-radius:5px;padding:6px 14px;font-size:11px;letter-spacing:1px}
+.pag a:hover{border-color:#6b7280;color:#e2e8f0}
+.pag .cur{background:#1f2937;border-color:#374151;color:#f1f5f9;font-weight:700;border-radius:5px;padding:6px 14px;font-size:11px}
+.pag .info{color:#6b7280;font-size:11px}
+.empty{text-align:center;color:#4b5563;padding:60px;letter-spacing:1px}
+
+/* ── TOAST ── */
+.toast{position:fixed;bottom:70px;right:16px;z-index:999;padding:9px 16px;border-radius:7px;font-size:11px;letter-spacing:1px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:280px}
+.toast.show{opacity:1}
+.toast.ok{background:#064e3b;border:1px solid #10b981;color:#6ee7b7}
+.toast.err{background:#7f1d1d;border:1px solid #ef4444;color:#fca5a5}
+</style>
+</head>
+<body>
+
+<header>
+  <div style="display:flex;align-items:center;min-width:0">
+    <span class="dot"></span>
+    <span class="title">{{ info_tabla.nombre | upper }}</span>
+    <span class="counter" style="margin-left:10px">{{ total }} total · pág {{ page }}/{{ total_pages }}</span>
+  </div>
+  <div class="hbtns">
+    <a href="/descargar_tabla/{{ nombre_tabla }}" class="btn btn-blue">⬇ CSV</a>
+    <a href="/admin_tablas" class="btn">← Tablas</a>
+  </div>
+</header>
+
+<!-- BÚSQUEDA SERVER-SIDE -->
+<div class="bar">
+  <form method="GET" action="" style="display:flex;gap:8px;flex:1;flex-wrap:wrap" id="search-form">
+    <input
+      type="text"
+      name="q"
+      class="sbox"
+      id="search-input"
+      value="{{ q }}"
+      placeholder="Busca por cualquier campo: folio, nombre, serie, estado..."
+      autocomplete="off"
+      autocorrect="off"
+      spellcheck="false"
+    >
+    <input type="hidden" name="page" value="1">
+    <button type="submit" class="sbtn">BUSCAR</button>
+    {% if q %}
+    <a href="/admin_tabla/{{ nombre_tabla }}" class="clear-btn">✕ limpiar</a>
+    {% endif %}
+  </form>
+  <span class="counter">{{ registros|length }} en esta página</span>
+</div>
+
+<!-- TABLA -->
+<div class="wrap">
+  {% if registros %}
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th class="num">#</th>
+        {% for col in columnas %}
+        <th>{{ col }}</th>
+        {% endfor %}
+        <th>DEL</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for reg in registros %}
+      <tr id="row-{{ loop.index }}">
+        <td class="num">{{ offset + loop.index }}</td>
+        {% for col in columnas %}
+        <td>
+          {% set val = reg.get(col) %}
+          <span
+            class="cv {{ col }}{% if val is none or val == '' %} null-val{% endif %}"
+            data-col="{{ col }}"
+            data-pk="{{ reg.get(pk_col, '') }}"
+            data-val="{{ val if val is not none else '' }}"
+            onclick="editCell(this)"
+            title="Click para editar · {{ col }}"
+          >{{ val if val is not none else 'null' }}</span>
+        </td>
+        {% endfor %}
+        <td>
+          <button class="del-btn"
+            onclick="deleteRow(this,'{{ reg.get(pk_col, '') }}','row-{{ loop.index }}')"
+            title="Eliminar">✕</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">
+    {% if q %}
+    Sin resultados para "{{ q }}"
+    {% else %}
+    Sin registros en esta tabla
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- PAGINACIÓN -->
+{% if total_pages > 1 %}
+<div class="pag">
+  {% if page > 1 %}
+  <a href="?q={{ q }}&page={{ page - 1 }}">← Ant</a>
+  {% endif %}
+
+  <span class="pag info">
+    {% if page > 2 %}<a href="?q={{ q }}&page=1">1</a>{% endif %}
+    {% if page > 3 %}<span style="color:#374151">…</span>{% endif %}
+    {% if page > 1 %}<a href="?q={{ q }}&page={{ page - 1 }}">{{ page - 1 }}</a>{% endif %}
+    <span class="cur">{{ page }}</span>
+    {% if page < total_pages %}<a href="?q={{ q }}&page={{ page + 1 }}">{{ page + 1 }}</a>{% endif %}
+    {% if page < total_pages - 2 %}<span style="color:#374151">…</span>{% endif %}
+    {% if page < total_pages - 1 %}<a href="?q={{ q }}&page={{ total_pages }}">{{ total_pages }}</a>{% endif %}
+  </span>
+
+  {% if page < total_pages %}
+  <a href="?q={{ q }}&page={{ page + 1 }}">Sig →</a>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="toast" id="toast"></div>
+
+<script>
+const TABLA  = "{{ nombre_tabla }}";
+const PK_COL = "{{ pk_col }}";
+
+// ── Click en celda → convierte span en input ──────────────────────────────
+function editCell(span) {
+  if (span.querySelector('input')) return;          // ya editando
+  if (span.parentNode.querySelector('input')) return;
+
+  const col    = span.dataset.col;
+  const pk     = span.dataset.pk;
+  const origTx = span.dataset.val;
+
+  const inp = document.createElement('input');
+  inp.type      = 'text';
+  inp.className = 'cell-input';
+  inp.value     = origTx;
+
+  // Guarda referencia al span para restaurarlo
+  inp._span    = span;
+  inp._origVal = origTx;
+  inp._col     = col;
+  inp._pk      = pk;
+
+  span.parentNode.insertBefore(inp, span);
+  span.style.display = 'none';
+
+  inp.focus();
+  inp.select();
+
+  inp.addEventListener('blur',    () => finishEdit(inp));
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  { e.preventDefault(); inp.blur(); }
+    if (e.key === 'Escape') { inp._cancel = true;  inp.blur(); }
+  });
+}
+
+function finishEdit(inp) {
+  const span   = inp._span;
+  const newVal = inp.value.trim();
+  const orig   = inp._origVal;
+
+  // Restaurar span
+  inp.remove();
+  span.style.display = '';
+
+  if (inp._cancel || newVal === orig) return;   // sin cambios o escape
+
+  // Optimistic update visual
+  span.textContent   = newVal || 'null';
+  span.dataset.val   = newVal;
+  span.classList.toggle('null-val', !newVal);
+
+  // AJAX save
+  inp.classList.add('saving');
+  fetch('/api/update_cell', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tabla: TABLA, pk_col: PK_COL, pk_val: inp._pk,
+                          col: inp._col, val: newVal})
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      showToast('✓ ' + inp._col + ' guardado', true);
+    } else {
+      span.textContent = orig || 'null';
+      span.dataset.val = orig;
+      showToast('Error: ' + (d.error || '?'), false);
+    }
+  })
+  .catch(() => {
+    span.textContent = orig || 'null';
+    span.dataset.val = orig;
+    showToast('Error de red', false);
+  });
+}
+
+// ── Eliminar fila ─────────────────────────────────────────────────────────
+function deleteRow(btn, pk, rowId) {
+  if (!confirm('¿Eliminar este registro?')) return;
+  btn.disabled    = true;
+  btn.textContent = '…';
+
+  fetch('/api/delete_row', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tabla: TABLA, pk_col: PK_COL, pk_val: pk})
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      const tr = document.getElementById(rowId);
+      if (tr) { tr.style.opacity='0'; setTimeout(()=>tr.remove(), 250); }
+      showToast('Eliminado', true);
+    } else {
+      btn.disabled    = false;
+      btn.textContent = '✕';
+      showToast('Error: ' + (d.error || '?'), false);
+    }
+  })
+  .catch(() => {
+    btn.disabled    = false;
+    btn.textContent = '✕';
+    showToast('Error de red', false);
+  });
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────
+let tt;
+function showToast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className   = 'toast show ' + (ok ? 'ok' : 'err');
+  clearTimeout(tt);
+  tt = setTimeout(() => t.classList.remove('show'), 2500);
+}
+</script>
+</body>
+</html>
+"""
+
+# ===================== RUTAS PRINCIPALES =====================
+@app.route('/')
+def inicio():
+    return redirect(url_for('login'))
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '').strip()
+
+        if username == 'Serg890105tm3' and password == 'Serg890105tm3':
+            session['admin']    = True
+            session['username'] = 'Serg890105tm3'
+            return redirect(url_for('admin'))
+
+        resp = supabase.table("verificaciondigitalcdmx")\
+            .select("*").eq("username", username).eq("password", password).execute()
+        if resp.data:
+            session['user_id']  = resp.data[0].get('id')
+            session['username'] = resp.data[0]['username']
+            session['admin']    = False
+            return redirect(url_for('registro_usuario'))
+
+        flash('Usuario o contraseña incorrectos', 'error')
+    return render_template('login.html')
+
+
+@app.route('/admin')
+def admin():
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    return render_template('panel.html')
+
+
+@app.route('/crear_usuario', methods=['GET', 'POST'])
+def crear_usuario():
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    if request.method == 'POST':
+        username = request.form['username'].strip()
+        password = request.form['password'].strip()
+        folios   = int(request.form['folios'])
+        existe   = supabase.table("verificaciondigitalcdmx")\
+            .select("id").eq("username", username).limit(1).execute()
+        if existe.data:
+            flash('Error: el usuario ya existe.', 'error')
+        else:
+            supabase.table("verificaciondigitalcdmx").insert({
+                "username": username, "password": password,
+                "folios_asignac": folios, "folios_usados": 0
             }).execute()
-            supabase.table("borradores_registros").insert({
-                "folio":             datos["folio"],
-                "entidad":           "CDMX",
-                "numero_serie":      datos["serie"],
-                "marca":             datos["marca"],
-                "linea":             datos["linea"],
-                "numero_motor":      datos["motor"],
-                "anio":              datos["anio"],
-                "fecha_expedicion":  hoy.isoformat(),
-                "fecha_vencimiento": fecha_ven.isoformat(),
-                "contribuyente":     datos["nombre"],
-                "estado":            "PENDIENTE",
-                "user_id":           user_id,
-            }).execute()
+            flash('Usuario creado.', 'success')
+    return render_template('crear_usuario.html')
 
-        await asyncio.to_thread(_insert_supabase)
-        await iniciar_timer_eliminacion(user_id, datos["folio"])
 
-        await bot.send_message(user_id,
-            f"INSTRUCCIONES DE PAGO\n\n"
-            f"Folio: {datos['folio']}\n"
-            f"Vigencia: {DIAS_PERMISO} dias\n"
-            f"Monto: ${PRECIO_PERMISO}\n"
-            f"Tiempo limite: 36 horas\n\n"
-            f"TRANSFERENCIA:\n"
-            f"Banco: AZTECA\n"
-            f"Titular: LIZBETH LAZCANO MOSCO\n"
-            f"Cuenta: 127180013037579543\n"
-            f"Concepto: Permiso {datos['folio']}\n\n"
-            f"OXXO:\n"
-            f"Referencia: 2242170180385581\n"
-            f"Titular: LIZBETH LAZCANO MOSCO\n"
-            f"Monto: ${PRECIO_PERMISO}\n\n"
-            f"Envia la foto del comprobante para validar.\n"
-            f"Sin pago en 36h el folio se elimina.\n\n"
-            f"Para generar otro permiso use /chuleta")
+@app.route('/registro_usuario', methods=['GET', 'POST'])
+def registro_usuario():
+    if not session.get('username'):
+        return redirect(url_for('login'))
+    if session.get('admin'):
+        return redirect(url_for('admin'))
 
-    except Exception as e:
-        print(f"[ERROR] generar_y_enviar_background folio {datos.get('folio','?')}: {e}")
+    ud = supabase.table("verificaciondigitalcdmx")\
+        .select("*").eq("username", session['username']).limit(1).execute()
+    if not ud.data:
+        flash("Usuario no encontrado.", "error")
+        return redirect(url_for('login'))
+
+    usuario            = ud.data[0]
+    folios_asignados   = int(usuario.get('folios_asignac', 0))
+    folios_usados      = int(usuario.get('folios_usados', 0))
+    folios_disponibles = folios_asignados - folios_usados
+    porcentaje         = (folios_usados / folios_asignados * 100) if folios_asignados else 0
+
+    ctx = dict(folios_asignados=folios_asignados,
+               folios_usados=folios_usados,
+               folios_disponibles=folios_disponibles,
+               porcentaje=porcentaje)
+
+    if request.method == 'POST':
+        if folios_disponibles <= 0:
+            flash("⚠️ Sin folios disponibles.", "error")
+            return render_template('registro_usuario.html', **ctx)
+
+        folio_manual = request.form.get('folio', '').strip()
+        marca        = request.form.get('marca', '').strip().upper()
+        linea        = request.form.get('linea', '').strip().upper()
+        anio         = request.form.get('anio', '').strip()
+        serie        = request.form.get('serie', '').strip().upper()
+        motor        = request.form.get('motor', '').strip().upper()
+        nombre       = request.form.get('nombre', '').strip().upper() or 'SIN NOMBRE'
+        fecha_str    = request.form.get('fecha_inicio', '').strip()
+
+        if not all([marca, linea, anio, serie, motor]):
+            flash("❌ Faltan campos obligatorios.", "error")
+            return render_template('registro_usuario.html', **ctx)
+
+        if not fecha_str:
+            fecha_inicio = now_cdmx()
+        else:
+            try:
+                fecha_inicio = datetime.strptime(fecha_str, '%Y-%m-%d').replace(tzinfo=TZ_CDMX)
+            except Exception:
+                flash("❌ Fecha inválida.", "error")
+                return render_template('registro_usuario.html', **ctx)
+
+        datos = {
+            "folio": folio_manual or None,
+            "marca": marca, "linea": linea, "anio": anio,
+            "numero_serie": serie, "numero_motor": motor,
+            "nombre": nombre,
+            "fecha_exp": fecha_inicio,
+            "fecha_ven": fecha_inicio + timedelta(days=DIAS_PERMISO)
+        }
+
+        if not guardar_folio_con_reintento(datos, session['username']):
+            flash("❌ Error al registrar.", "error")
+            return render_template('registro_usuario.html', **ctx)
+
+        generar_pdf_unificado_cdmx(datos)
+        supabase.table("verificaciondigitalcdmx")\
+            .update({"folios_usados": folios_usados + 1})\
+            .eq("username", session['username']).execute()
+
+        flash(f'✅ Folio: {datos["folio"]}', 'success')
+        return render_template('exitoso.html',
+                               folio=datos["folio"], serie=serie,
+                               fecha_generacion=fecha_inicio.strftime('%d/%m/%Y %H:%M'))
+
+    return render_template('registro_usuario.html', **ctx)
+
+
+@app.route('/mis_permisos')
+def mis_permisos():
+    if not session.get('username') or session.get('admin'):
+        return redirect(url_for('login'))
+
+    permisos = supabase.table("folios_registrados")\
+        .select("*").eq("creado_por", session['username'])\
+        .order("fecha_expedicion", desc=True).execute().data or []
+
+    hoy = today_cdmx()
+    for p in permisos:
         try:
-            await bot.send_message(user_id,
-                f"Error al generar el documento: {e}\n\nUse /chuleta para reintentar.")
+            fe = parse_date_any(p.get('fecha_expedicion'))
+            fv = parse_date_any(p.get('fecha_vencimiento'))
+            p['fecha_formateada'] = fe.strftime('%d/%m/%Y')
+            p['hora_formateada']  = "00:00:00"
+            p['estado']           = "VIGENTE" if hoy <= fv else "VENCIDO"
         except Exception:
-            pass
+            p['fecha_formateada'] = p['hora_formateada'] = p['estado'] = 'ERROR'
 
-# ------------ FSM ------------
-class PermisoForm(StatesGroup):
-    marca  = State()
-    linea  = State()
-    anio   = State()
-    serie  = State()
-    motor  = State()
-    nombre = State()
+    ur = supabase.table("verificaciondigitalcdmx")\
+        .select("folios_asignac,folios_usados")\
+        .eq("username", session['username']).limit(1).execute().data
+    ur = ur[0] if ur else {"folios_asignac": 0, "folios_usados": 0}
 
-# ------------ HANDLERS ------------
-@dp.message(Command("start"))
-async def start_cmd(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "SISTEMA DIGITAL DE LA CIUDAD DE MEXICO\n\n"
-        f"Costo: ${PRECIO_PERMISO}\n"
-        "Tiempo limite: 36 horas\n\n"
-        "Su folio se elimina si no paga en 36 horas.")
+    return render_template('mis_permisos.html',
+                           permisos=permisos, total_generados=len(permisos),
+                           folios_asignados=int(ur.get('folios_asignac', 0)),
+                           folios_usados=int(ur.get('folios_usados', 0)))
 
-@dp.message(Command("chuleta"))
-async def chuleta_cmd(message: types.Message, state: FSMContext):
-    folios = obtener_folios_usuario(message.from_user.id)
-    extra  = f"\n\nFOLIOS ACTIVOS: {', '.join(folios)}" if folios else ""
-    await message.answer(
-        f"NUEVO PERMISO - CDMX\n\n"
-        f"Costo: ${PRECIO_PERMISO}\n"
-        f"Plazo de pago: 36 horas{extra}\n\n"
-        f"Primer paso: MARCA del vehiculo:")
-    await state.set_state(PermisoForm.marca)
 
-@dp.message(PermisoForm.marca)
-async def get_marca(message: types.Message, state: FSMContext):
-    await state.update_data(marca=message.text.strip().upper())
-    await message.answer("LINEA/MODELO del vehiculo:")
-    await state.set_state(PermisoForm.linea)
+@app.route('/registro_admin', methods=['GET', 'POST'])
+def registro_admin():
+    if not session.get('admin'):
+        return redirect(url_for('login'))
 
-@dp.message(PermisoForm.linea)
-async def get_linea(message: types.Message, state: FSMContext):
-    await state.update_data(linea=message.text.strip().upper())
-    await message.answer("ANIO del vehiculo (4 digitos):")
-    await state.set_state(PermisoForm.anio)
+    if request.method == 'POST':
+        folio_manual = request.form.get('folio', '').strip()
+        marca        = request.form.get('marca', '').strip().upper()
+        linea        = request.form.get('linea', '').strip().upper()
+        anio         = request.form.get('anio', '').strip()
+        serie        = request.form.get('serie', '').strip().upper()
+        motor        = request.form.get('motor', '').strip().upper()
+        nombre       = request.form.get('nombre', '').strip().upper() or 'SIN NOMBRE'
+        fecha_str    = request.form.get('fecha_inicio', '').strip()
 
-@dp.message(PermisoForm.anio)
-async def get_anio(message: types.Message, state: FSMContext):
-    anio = message.text.strip()
-    if not anio.isdigit() or len(anio) != 4:
-        await message.answer("Formato invalido. Use 4 digitos (ej. 2021):")
-        return
-    await state.update_data(anio=anio)
-    await message.answer("NUMERO DE SERIE:")
-    await state.set_state(PermisoForm.serie)
+        if not all([marca, linea, anio, serie, motor, fecha_str]):
+            flash("❌ Faltan campos.", "error")
+            return redirect(url_for('registro_admin'))
 
-@dp.message(PermisoForm.serie)
-async def get_serie(message: types.Message, state: FSMContext):
-    await state.update_data(serie=message.text.strip().upper())
-    await message.answer("NUMERO DE MOTOR:")
-    await state.set_state(PermisoForm.motor)
-
-@dp.message(PermisoForm.motor)
-async def get_motor(message: types.Message, state: FSMContext):
-    await state.update_data(motor=message.text.strip().upper())
-    await message.answer("NOMBRE COMPLETO del propietario:")
-    await state.set_state(PermisoForm.nombre)
-
-@dp.message(PermisoForm.nombre)
-async def get_nombre(message: types.Message, state: FSMContext):
-    datos             = await state.get_data()
-    datos["nombre"]   = message.text.strip().upper()
-    datos["user_id"]  = message.from_user.id
-    datos["username"] = message.from_user.username or "Sin username"
-
-    try:
-        datos["folio"] = await obtener_siguiente_folio()
-    except Exception as e:
-        await message.answer(f"ERROR generando folio: {e}\n\nUse /chuleta")
-        await state.clear()
-        return
-
-    hoy = datetime.now()
-    meses = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",
-             7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
-    datos["fecha"]     = f"{hoy.day} de {meses[hoy.month]} del {hoy.year}"
-    datos["fecha_obj"] = hoy
-
-    await state.clear()
-
-    await message.answer(
-        f"Folio: <b>{datos['folio']}</b>\n"
-        f"Titular: <b>{datos['nombre']}</b>\n"
-        f"Vigencia: <b>{DIAS_PERMISO} dias</b>\n"
-        f"Monto: <b>${PRECIO_PERMISO}</b>\n\n"
-        f"Generando documentacion...",
-        parse_mode="HTML")
-
-    asyncio.create_task(generar_y_enviar_background(message.chat.id, datos))
-
-# ------------ CALLBACKS ADMIN ------------
-@dp.callback_query(lambda c: c.data and c.data.startswith("validar_"))
-async def callback_validar_admin(callback: CallbackQuery):
-    folio = callback.data.replace("validar_", "")
-    if not folio.startswith("122"):
-        await callback.answer("Folio invalido", show_alert=True)
-        return
-    if folio in timers_activos:
-        uid = timers_activos[folio]["user_id"]
-        cancelar_timer_folio(folio)
         try:
-            now = datetime.now().isoformat()
-            await asyncio.to_thread(lambda: (
-                supabase.table("folios_registrados").update(
-                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-                ).eq("folio", folio).execute(),
-                supabase.table("borradores_registros").update(
-                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-                ).eq("folio", folio).execute()
-            ))
-        except Exception as e:
-            print(f"[ERROR] BD validar {folio}: {e}")
-        await callback.answer("Folio validado", show_alert=True)
-        await callback.message.edit_reply_markup(reply_markup=None)
-        try:
-            await bot.send_message(uid,
-                f"PAGO VALIDADO - CDMX\n"
-                f"Folio: {folio}\nPermiso activo para circular.\n\n"
-                f"Use /chuleta para generar otro.")
-        except Exception as e:
-            print(f"[ERROR] Notificar: {e}")
-    else:
-        await callback.answer("Folio no encontrado en timers", show_alert=True)
+            fecha_inicio = datetime.strptime(fecha_str, '%Y-%m-%d').replace(tzinfo=TZ_CDMX)
+        except Exception:
+            flash("❌ Fecha inválida.", "error")
+            return redirect(url_for('registro_admin'))
 
-@dp.callback_query(lambda c: c.data and c.data.startswith("detener_"))
-async def callback_detener_timer(callback: CallbackQuery):
-    folio = callback.data.replace("detener_", "")
-    if folio in timers_activos:
-        cancelar_timer_folio(folio)
-        try:
-            await asyncio.to_thread(lambda:
-                supabase.table("folios_registrados").update(
-                    {"estado": "TIMER_DETENIDO", "fecha_detencion": datetime.now().isoformat()}
-                ).eq("folio", folio).execute()
-            )
-        except Exception as e:
-            print(f"[ERROR] BD detener {folio}: {e}")
-        await callback.answer("Timer detenido", show_alert=True)
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(
-            f"TIMER DETENIDO\nFolio: {folio}\n\nUse /chuleta para generar otro.")
-    else:
-        await callback.answer("Timer ya no activo", show_alert=True)
+        datos = {
+            "folio": folio_manual or None,
+            "marca": marca, "linea": linea, "anio": anio,
+            "numero_serie": serie, "numero_motor": motor,
+            "nombre": nombre,
+            "fecha_exp": fecha_inicio,
+            "fecha_ven": fecha_inicio + timedelta(days=DIAS_PERMISO)
+        }
 
-# ------------ ADMIN POR TEXTO (SERO) ------------
-@dp.message(lambda m: m.text and m.text.strip().upper().startswith("SERO"))
-async def codigo_admin(message: types.Message):
-    texto = message.text.strip().upper()
-    if len(texto) <= 4:
-        await message.answer("Formato: SERO[folio]  Ejemplo: SERO1225")
-        return
-    folio = texto[4:]
-    if not folio.startswith("122"):
-        await message.answer(f"Folio {folio} no es CDMX (debe iniciar con 122)")
-        return
-    if folio in timers_activos:
-        uid = timers_activos[folio]["user_id"]
-        cancelar_timer_folio(folio)
-        try:
-            now = datetime.now().isoformat()
-            await asyncio.to_thread(lambda: (
-                supabase.table("folios_registrados").update(
-                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-                ).eq("folio", folio).execute(),
-                supabase.table("borradores_registros").update(
-                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
-                ).eq("folio", folio).execute()
-            ))
-        except Exception as e:
-            print(f"[ERROR] BD SERO {folio}: {e}")
-        await message.answer(f"VALIDACION OK\nFolio: {folio}\nTimer cancelado.")
-        try:
-            await bot.send_message(uid,
-                f"PAGO VALIDADO - CDMX\n"
-                f"Folio: {folio}\nPermiso activo.\n\n"
-                f"Use /chuleta para generar otro.")
-        except Exception as e:
-            print(f"[ERROR] Notificar: {e}")
-    else:
-        await message.answer(f"Folio {folio} no encontrado en timers activos.")
+        if not guardar_folio_con_reintento(datos, "ADMIN"):
+            flash("❌ Error al registrar.", "error")
+            return redirect(url_for('registro_admin'))
 
-# ------------ COMPROBANTE FOTO ------------
-@dp.message(lambda m: m.content_type == ContentType.PHOTO)
-async def recibir_comprobante(message: types.Message):
-    uid    = message.from_user.id
-    folios = obtener_folios_usuario(uid)
-    if not folios:
-        await message.answer("No hay tramites pendientes.\n\nUse /chuleta para generar uno.")
-        return
-    if len(folios) > 1:
-        pending_comprobantes[uid] = "waiting_folio"
-        lista = "\n".join(f"- {f}" for f in folios)
-        await message.answer(f"Folios activos:\n{lista}\n\nResponde con el FOLIO de este comprobante.")
-        return
-    folio = folios[0]
-    cancelar_timer_folio(folio)
-    try:
-        now = datetime.now().isoformat()
-        await asyncio.to_thread(lambda: (
-            supabase.table("folios_registrados").update(
-                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
-            ).eq("folio", folio).execute(),
-            supabase.table("borradores_registros").update(
-                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
-            ).eq("folio", folio).execute()
-        ))
-    except Exception as e:
-        print(f"[ERROR] comprobante {folio}: {e}")
-    await message.answer(f"Comprobante recibido.\nFolio: {folio}\nTimer detenido.\n\nUse /chuleta para generar otro.")
+        generar_pdf_unificado_cdmx(datos)
+        flash('✅ Permiso generado.', 'success')
+        return render_template('exitoso.html',
+                               folio=datos["folio"], serie=serie,
+                               fecha_generacion=fecha_inicio.strftime('%d/%m/%Y %H:%M'))
 
-@dp.message(lambda m: m.from_user.id in pending_comprobantes
-            and pending_comprobantes[m.from_user.id] == "waiting_folio")
-async def especificar_folio_comprobante(message: types.Message):
-    uid    = message.from_user.id
-    folio  = message.text.strip().upper()
-    folios = obtener_folios_usuario(uid)
-    if folio not in folios:
-        await message.answer("Folio no esta en tu lista. Escribe uno de tu lista.")
-        return
-    cancelar_timer_folio(folio)
-    del pending_comprobantes[uid]
-    try:
-        now = datetime.now().isoformat()
-        await asyncio.to_thread(lambda: (
-            supabase.table("folios_registrados").update(
-                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
-            ).eq("folio", folio).execute(),
-            supabase.table("borradores_registros").update(
-                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
-            ).eq("folio", folio).execute()
-        ))
-    except Exception as e:
-        print(f"[ERROR] comprobante asociado {folio}: {e}")
-    await message.answer(f"Comprobante asociado.\nFolio: {folio}\nTimer detenido.\n\nUse /chuleta para generar otro.")
+    return render_template('registro_admin.html')
 
-@dp.message(Command("folios"))
-async def ver_folios_activos(message: types.Message):
-    uid    = message.from_user.id
-    folios = obtener_folios_usuario(uid)
-    if not folios:
-        await message.answer("No hay folios activos.\n\nUse /chuleta para generar uno.")
-        return
-    lineas = []
+
+@app.route('/consulta_folio', methods=['GET', 'POST'])
+def consulta_folio():
+    if request.method == 'POST':
+        folio = request.form['folio'].strip()
+        rows  = supabase.table("folios_registrados")\
+            .select("*").eq("folio", folio).limit(1).execute().data
+        if not rows:
+            resultado = {"estado": "NO REGISTRADO", "color": "rojo", "folio": folio}
+        else:
+            r = rows[0]
+            fe = parse_date_any(r.get('fecha_expedicion'))
+            fv = parse_date_any(r.get('fecha_vencimiento'))
+            hoy    = today_cdmx()
+            estado = "VIGENTE" if hoy <= fv else "VENCIDO"
+            resultado = {
+                "estado": estado, "color": "verde" if estado == "VIGENTE" else "cafe",
+                "folio": folio,
+                "fecha_expedicion": fe.strftime('%d/%m/%Y'),
+                "fecha_vencimiento": fv.strftime('%d/%m/%Y'),
+                "marca": r.get('marca',''), "linea": r.get('linea',''),
+                "año": r.get('anio',''), "numero_serie": r.get('numero_serie',''),
+                "numero_motor": r.get('numero_motor',''), "entidad": r.get('entidad', ENTIDAD)
+            }
+        return render_template('resultado_consulta.html', resultado=resultado)
+    return render_template('consulta_folio.html')
+
+
+@app.route('/consulta/<folio>')
+def consulta_folio_directo(folio):
+    row = supabase.table("folios_registrados")\
+        .select("*").eq("folio", folio).limit(1).execute().data
+    if not row:
+        return render_template("resultado_consulta.html",
+                               resultado={"estado":"NO REGISTRADO","color":"rojo","folio":folio})
+    r  = row[0]
+    fe = parse_date_any(r.get('fecha_expedicion'))
+    fv = parse_date_any(r.get('fecha_vencimiento'))
+    hoy    = today_cdmx()
+    estado = "VIGENTE" if hoy <= fv else "VENCIDO"
+    return render_template("resultado_consulta.html", resultado={
+        "estado": estado, "color": "verde" if estado=="VIGENTE" else "cafe",
+        "folio": folio,
+        "fecha_expedicion": fe.strftime("%d/%m/%Y"),
+        "fecha_vencimiento": fv.strftime("%d/%m/%Y"),
+        "marca": r.get('marca',''), "linea": r.get('linea',''),
+        "año": r.get('anio',''), "numero_serie": r.get('numero_serie',''),
+        "numero_motor": r.get('numero_motor',''), "entidad": r.get('entidad', ENTIDAD)
+    })
+
+
+@app.route('/descargar_pdf/<folio>')
+def descargar_pdf(folio):
+    ruta = os.path.join(OUTPUT_DIR, f"{folio}.pdf")
+    if not os.path.exists(ruta):
+        abort(404)
+    return send_file(ruta, as_attachment=True,
+                     download_name=f"{folio}_cdmx.pdf",
+                     mimetype='application/pdf')
+
+
+@app.route('/admin_folios')
+def admin_folios():
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    filtro        = request.args.get('filtro', '').strip()
+    criterio      = request.args.get('criterio', 'folio')
+    estado_filtro = request.args.get('estado', 'todos')
+    fecha_inicio  = request.args.get('fecha_inicio', '')
+    fecha_fin     = request.args.get('fecha_fin', '')
+    ordenar       = request.args.get('ordenar', 'desc')
+
+    q = supabase.table("folios_registrados").select("*").eq("entidad", ENTIDAD)
+    if filtro:
+        if criterio == 'folio':
+            q = q.ilike('folio', f'%{filtro}%')
+        elif criterio == 'numero_serie':
+            q = q.ilike('numero_serie', f'%{filtro}%')
+    if fecha_inicio:
+        q = q.gte('fecha_expedicion', fecha_inicio)
+    if fecha_fin:
+        q = q.lte('fecha_expedicion', fecha_fin)
+    q      = q.order('fecha_expedicion', desc=(ordenar=='desc'))
+    folios = q.execute().data or []
+
+    hoy = today_cdmx()
+    out = []
     for f in folios:
-        if f in timers_activos:
-            mins = max(0, 2160 - int((datetime.now() - timers_activos[f]["start_time"]).total_seconds() / 60))
-            lineas.append(f"- {f} ({mins//60}h {mins%60}min restantes)")
-        else:
-            lineas.append(f"- {f} (sin timer)")
-    await message.answer(
-        f"FOLIOS CDMX ACTIVOS ({len(folios)})\n\n" + "\n".join(lineas) +
-        "\n\nEnvia imagen para comprobante.\nUse /chuleta para generar otro.")
+        try:
+            fv = parse_date_any(f.get('fecha_vencimiento'))
+            f['estado'] = "VIGENTE" if hoy <= fv else "VENCIDO"
+        except Exception:
+            f['estado'] = 'ERROR'
+        if estado_filtro == 'todos' or estado_filtro == f['estado'].lower():
+            out.append(f)
 
-@dp.message(lambda m: m.text and any(p in m.text.lower() for p in
-            ['costo','precio','cuanto','cuánto','deposito','depósito','pago','valor','monto']))
-async def responder_costo(message: types.Message):
-    await message.answer(f"Costo del permiso: ${PRECIO_PERMISO} (30 dias)\n\nUse /chuleta para generar uno.")
+    return render_template('admin_folios.html',
+                           folios=out, filtro=filtro, criterio=criterio,
+                           estado=estado_filtro, fecha_inicio=fecha_inicio,
+                           fecha_fin=fecha_fin, ordenar=ordenar)
 
-@dp.message()
-async def fallback(message: types.Message):
-    await message.answer("Sistema Digital CDMX.")
 
-# ------------ FASTAPI ------------
-_keep_task = None
+@app.route('/editar_folio/<folio>', methods=['GET', 'POST'])
+def editar_folio(folio):
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    if request.method == 'POST':
+        supabase.table("folios_registrados").update({
+            "marca":             request.form['marca'],
+            "linea":             request.form['linea'],
+            "anio":              request.form['anio'],
+            "numero_serie":      request.form['serie'],
+            "numero_motor":      request.form['motor'],
+            "fecha_expedicion":  request.form['fecha_expedicion'],
+            "fecha_vencimiento": request.form['fecha_vencimiento']
+        }).eq("folio", folio).execute()
+        flash("Folio actualizado.", "success")
+        return redirect(url_for('admin_folios'))
+    resp = supabase.table("folios_registrados").select("*").eq("folio", folio).execute()
+    if not resp.data:
+        flash("Folio no encontrado.", "error")
+        return redirect(url_for('admin_folios'))
+    return render_template("editar_folio.html", folio=resp.data[0])
 
-async def keep_alive():
-    while True:
-        await asyncio.sleep(600)
-        print("[HEARTBEAT] Sistema CDMX activo")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _keep_task
+@app.route('/eliminar_folio', methods=['POST'])
+def eliminar_folio():
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    supabase.table("folios_registrados").delete().eq("folio", request.form['folio']).execute()
+    flash("Folio eliminado.", "success")
+    return redirect(url_for('admin_folios'))
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+# ===================== ADMIN TABLAS =====================
+@app.route('/admin_tablas')
+def admin_tablas():
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    return render_template('admin_tablas.html', tablas=TABLAS_DISPONIBLES)
+
+
+@app.route('/admin_tabla/<nombre_tabla>')
+def admin_tabla(nombre_tabla):
+    """
+    Tabla inline editable con:
+    - Celdas como texto (RÁPIDO) → input solo al hacer click
+    - Búsqueda server-side sin selector de columna
+    - Paginación de 100 registros
+    """
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    if nombre_tabla not in TABLAS_DISPONIBLES:
+        flash('Tabla no encontrada', 'error')
+        return redirect(url_for('admin_tablas'))
+
+    info_tabla = TABLAS_DISPONIBLES[nombre_tabla]
+    pk_col     = info_tabla['pk_col']
+    scols      = info_tabla.get('search_cols', [])
+
+    q    = request.args.get('q', '').strip()
+    page = max(1, int(request.args.get('page', 1)))
+    offset = (page - 1) * PAGE_SIZE
+
     try:
-        await asyncio.to_thread(_sb_inicializar_folio)
-        await bot.delete_webhook(drop_pending_updates=True)
-        if BASE_URL:
-            wh = f"{BASE_URL}/webhook"
-            await bot.set_webhook(wh, allowed_updates=["message", "callback_query"])
-            print(f"[WEBHOOK] {wh}")
-            _keep_task = asyncio.create_task(keep_alive())
-        else:
-            print("[POLLING] Sin webhook")
-        print("[SISTEMA] CDMX v7.2 iniciado!")
-        yield
+        # ── Contar total ──────────────────────────────────────────────────
+        count_q = supabase.table(nombre_tabla).select("*", count='exact')
+        if q and scols:
+            or_str = ','.join(f'{c}.ilike.%{q}%' for c in scols)
+            count_q = count_q.or_(or_str)
+        count_r = count_q.execute()
+        total   = count_r.count if count_r.count is not None else len(count_r.data)
+
+        # ── Traer página ──────────────────────────────────────────────────
+        data_q = supabase.table(nombre_tabla).select("*")
+        if q and scols:
+            or_str = ','.join(f'{c}.ilike.%{q}%' for c in scols)
+            data_q = data_q.or_(or_str)
+        registros = data_q.range(offset, offset + PAGE_SIZE - 1).execute().data or []
+
     except Exception as e:
-        print(f"[ERROR CRITICO] {e}")
-        yield
-    finally:
-        print("[CIERRE] Cerrando...")
-        if _keep_task:
-            _keep_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await _keep_task
-        await bot.session.close()
+        flash(f'Error al cargar datos: {e}', 'error')
+        registros, total = [], 0
 
-app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.2")
+    # Columnas reales de Supabase
+    columnas    = list(registros[0].keys()) if registros else info_tabla.get('search_cols', [])
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
 
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
+    return render_template_string(TABLE_TEMPLATE,
+                                  nombre_tabla=nombre_tabla,
+                                  info_tabla=info_tabla,
+                                  registros=registros,
+                                  columnas=columnas,
+                                  pk_col=pk_col,
+                                  q=q,
+                                  page=page,
+                                  offset=offset,
+                                  total=total,
+                                  total_pages=total_pages)
+
+
+# ===================== API INLINE EDITING =====================
+@app.route('/api/update_cell', methods=['POST'])
+def api_update_cell():
+    if not session.get('admin'):
+        return jsonify({"ok": False, "error": "no autorizado"}), 403
+    d      = request.get_json(force=True)
+    tabla  = d.get('tabla')
+    pk_col = d.get('pk_col')
+    pk_val = d.get('pk_val')
+    col    = d.get('col')
+    val    = d.get('val', '')
+    if tabla not in TABLAS_DISPONIBLES:
+        return jsonify({"ok": False, "error": "tabla no permitida"}), 400
     try:
-        data   = await request.json()
-        update = types.Update(**data)
-        await dp.feed_webhook_update(bot, update)
-        return {"ok": True}
+        supabase.table(tabla).update({col: val or None}).eq(pk_col, pk_val).execute()
+        return jsonify({"ok": True})
     except Exception as e:
-        print(f"[ERROR] webhook: {e}")
-        return {"ok": False, "error": str(e)}
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.get("/")
-async def health():
-    return {
-        "ok":              True,
-        "sistema":         "CDMX v7.2",
-        "vigencia":        f"{DIAS_PERMISO} dias fijos",
-        "precio":          f"${PRECIO_PERMISO}",
-        "timer":           "36 horas",
-        "active_timers":   len(timers_activos),
-        "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
-        "fixes_v7.2": [
-            "Folio: busqueda +1 puro hasta el infinito sin saltos raros",
-            "Inicializacion: lee TODOS los folios 122x, toma el maximo real",
-            "Si folio ocupado -> +1 -> +1 -> ... hasta encontrar libre",
-            "asyncio.to_thread en PDF, QR y Supabase mantenido",
-            "pagina2: coordenadas explicitas igual que pagina1",
-        ]
-    }
 
-@app.get("/status")
-async def status_detail():
-    return {
-        "sistema":         "CDMX v7.2",
-        "timers_activos":  len(timers_activos),
-        "folios_activos":  list(timers_activos.keys()),
-        "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
-        "timestamp":       datetime.now().isoformat(),
-    }
+@app.route('/api/delete_row', methods=['POST'])
+def api_delete_row():
+    if not session.get('admin'):
+        return jsonify({"ok": False, "error": "no autorizado"}), 403
+    d      = request.get_json(force=True)
+    tabla  = d.get('tabla')
+    pk_col = d.get('pk_col')
+    pk_val = d.get('pk_val')
+    if tabla not in TABLAS_DISPONIBLES:
+        return jsonify({"ok": False, "error": "tabla no permitida"}), 400
+    try:
+        supabase.table(tabla).delete().eq(pk_col, pk_val).execute()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+@app.route('/descargar_tabla/<nombre_tabla>')
+def descargar_tabla(nombre_tabla):
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    if nombre_tabla not in TABLAS_DISPONIBLES:
+        abort(404)
+    try:
+        registros = supabase.table(nombre_tabla).select("*").limit(100_000).execute().data or []
+    except Exception as e:
+        flash(f'Error: {e}', 'error')
+        return redirect(url_for('admin_tabla', nombre_tabla=nombre_tabla))
+    if not registros:
+        flash("Sin registros.", "error")
+        return redirect(url_for('admin_tabla', nombre_tabla=nombre_tabla))
+    out = StringIO()
+    w   = csv.DictWriter(out, fieldnames=list(registros[0].keys()), extrasaction='ignore')
+    w.writeheader()
+    w.writerows(registros)
+    return Response(out.getvalue(), mimetype='text/csv; charset=utf-8',
+                    headers={'Content-Disposition': f'attachment;filename={nombre_tabla}.csv'})
+
+
+# ===================== RUTAS HEREDADAS (compatibilidad) =====================
+@app.route('/admin_editar_registro/<nombre_tabla>/<registro_id>', methods=['GET', 'POST'])
+def admin_editar_registro(nombre_tabla, registro_id):
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    if nombre_tabla not in TABLAS_DISPONIBLES:
+        return redirect(url_for('admin_tablas'))
+    info   = TABLAS_DISPONIBLES[nombre_tabla]
+    pk_col = info['pk_col']
+    if request.method == 'POST':
+        datos = {c: request.form[c].strip() for c in info.get('search_cols', []) if c in request.form and request.form[c].strip()}
+        try:
+            supabase.table(nombre_tabla).update(datos).eq(pk_col, registro_id).execute()
+            flash('Actualizado.', 'success')
+        except Exception as e:
+            flash(f'Error: {e}', 'error')
+        return redirect(url_for('admin_tabla', nombre_tabla=nombre_tabla))
+    reg = supabase.table(nombre_tabla).select("*").eq(pk_col, registro_id).execute().data
+    if not reg:
+        flash('No encontrado.', 'error')
+        return redirect(url_for('admin_tabla', nombre_tabla=nombre_tabla))
+    return render_template('admin_editar_registro.html',
+                           nombre_tabla=nombre_tabla, info_tabla=info,
+                           registro=reg[0], registro_id=registro_id)
+
+
+@app.route('/admin_eliminar_registro/<nombre_tabla>/<registro_id>', methods=['POST'])
+def admin_eliminar_registro(nombre_tabla, registro_id):
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    if nombre_tabla not in TABLAS_DISPONIBLES:
+        return redirect(url_for('admin_tablas'))
+    pk_col = TABLAS_DISPONIBLES[nombre_tabla]['pk_col']
+    try:
+        supabase.table(nombre_tabla).delete().eq(pk_col, registro_id).execute()
+        flash('Eliminado.', 'success')
+    except Exception as e:
+        flash(f'Error: {e}', 'error')
+    return redirect(url_for('admin_tabla', nombre_tabla=nombre_tabla))
+
+
+@app.route('/admin_agregar_registro/<nombre_tabla>', methods=['GET', 'POST'])
+def admin_agregar_registro(nombre_tabla):
+    if not session.get('admin'):
+        return redirect(url_for('login'))
+    if nombre_tabla not in TABLAS_DISPONIBLES:
+        return redirect(url_for('admin_tablas'))
+    info = TABLAS_DISPONIBLES[nombre_tabla]
+    if request.method == 'POST':
+        datos = {c: request.form[c].strip() for c in info.get('search_cols', [])
+                 if c != 'id' and c in request.form and request.form[c].strip()}
+        try:
+            supabase.table(nombre_tabla).insert(datos).execute()
+            flash('Agregado.', 'success')
+            return redirect(url_for('admin_tabla', nombre_tabla=nombre_tabla))
+        except Exception as e:
+            flash(f'Error: {e}', 'error')
+    return render_template('admin_agregar_registro.html',
+                           nombre_tabla=nombre_tabla, info_tabla=info)
+
+
+# ===================== MAIN =====================
+if __name__ == '__main__':
+    logger.info("🚀 SERVIDOR CDMX")
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
