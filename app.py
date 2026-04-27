@@ -198,7 +198,7 @@ def _generar_pdf_unificado(datos: dict) -> str:
         page2.insert_text((135, 168), titulo,                   fontsize=6,  fontname="hebo", color=(0,0,0))
         page2.insert_text((135, 192), datos["serie"],           fontsize=6,  fontname="hebo", color=(0,0,0))
         page2.insert_text((135, 200), anio_str,                 fontsize=6,  fontname="hebo", color=(0,0,0))
-        page2.insert_text((335, 406), f"${PRECIO_PERMISO}",     fontsize=12, fontname="hebo", color=(0,0,0))
+        page2.insert_text((335, 420), f"${PRECIO_PERMISO}",     fontsize=12, fontname="hebo", color=(0,0,0))
         page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"), fontsize=6,  fontname="hebo", color=(0,0,0))
         doc1.insert_pdf(doc2)
         doc2.close()
