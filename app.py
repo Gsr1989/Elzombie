@@ -47,18 +47,21 @@ pending_comprobantes = {}
 FOLIO_PREFIJO = "122"
 folio_counter = {"siguiente": 1}
 
+# ── Lock para evitar race condition en generación de folios ──────────────────
+# Sin esto, dos requests simultáneos pueden asignar el mismo folio
+_folio_lock = asyncio.Lock()
+
 # ── Supabase síncrono ────────────────────────────────────────────────────────
 
 def _sb_obtener_siguiente_folio() -> str:
     """
-    Hace UNA sola consulta a Supabase para traer todos los folios 122x,
-    construye un set en memoria y busca el primer hueco desde el candidato actual.
-    Proceso: milisegundos, no minutos.
+    1 sola consulta a Supabase → set en memoria → busca primer hueco.
+    Se llama SIEMPRE dentro de _folio_lock para evitar duplicados.
     """
     try:
-        r = supabase.table("folios_registrados")\
-            .select("folio")\
-            .like("folio", f"{FOLIO_PREFIJO}%")\
+        r = supabase.table("folios_registrados") \
+            .select("folio") \
+            .like("folio", f"{FOLIO_PREFIJO}%") \
             .execute()
 
         existentes = set()
@@ -73,12 +76,11 @@ def _sb_obtener_siguiente_folio() -> str:
 
     candidato = folio_counter["siguiente"]
 
-    # Busca el primer número libre en el set (sin tocar la BD)
     for _ in range(10_000_000):
         if candidato not in existentes:
             folio_counter["siguiente"] = candidato + 1
             folio_asignado = f"{FOLIO_PREFIJO}{candidato}"
-            print(f"[FOLIO] ✅ Asignado: {folio_asignado}  (siguiente: {folio_counter['siguiente']})")
+            print(f"[FOLIO] ✅ Asignado: {folio_asignado} — siguiente: {folio_counter['siguiente']}")
             return folio_asignado
         candidato += 1
 
@@ -88,9 +90,9 @@ def _sb_obtener_siguiente_folio() -> str:
 def _sb_inicializar_folio():
     """Lee el máximo folio 122x existente y arranca desde max+1."""
     try:
-        r = supabase.table("folios_registrados")\
-            .select("folio")\
-            .like("folio", f"{FOLIO_PREFIJO}%")\
+        r = supabase.table("folios_registrados") \
+            .select("folio") \
+            .like("folio", f"{FOLIO_PREFIJO}%") \
             .execute()
 
         consecutivos = []
@@ -113,10 +115,17 @@ def _sb_inicializar_folio():
         print(f"[ERROR] inicializar_folio: {e}")
         folio_counter["siguiente"] = 1
 
-# ── Wrappers async ────────────────────────────────────────────────────────────
 
+# ── Wrapper async con Lock ────────────────────────────────────────────────────
 async def obtener_siguiente_folio() -> str:
-    return await asyncio.to_thread(_sb_obtener_siguiente_folio)
+    """
+    El Lock garantiza que solo UN request a la vez genera folio.
+    Elimina el race condition donde dos requests simultáneos
+    asignaban el mismo número → duplicate key en Supabase.
+    """
+    async with _folio_lock:
+        return await asyncio.to_thread(_sb_obtener_siguiente_folio)
+
 
 def obtener_folios_usuario(user_id: int) -> list:
     return user_folios.get(user_id, [])
@@ -173,10 +182,10 @@ async def iniciar_timer_eliminacion(user_id: int, folio: str, nombre: str = ""):
         "task":       task,
         "user_id":    user_id,
         "start_time": datetime.now(),
-        "nombre":     nombre,          # ← guardamos el nombre del contribuyente
+        "nombre":     nombre,
     }
     user_folios.setdefault(user_id, []).append(folio)
-    print(f"[SISTEMA] Timer iniciado {folio} ({nombre}), total activos: {len(timers_activos)}")
+    print(f"[SISTEMA] Timer iniciado {folio} ({nombre}), total: {len(timers_activos)}")
 
 
 def cancelar_timer_folio(folio: str):
@@ -217,14 +226,13 @@ def _generar_qr_cdmx(folio: str):
         print(f"[ERROR QR] {e}")
         return None
 
-# ------------ PDF ---------------------------------------------------------------
-
+# ------------ PDF ------------
 def _generar_pdf_unificado(datos: dict) -> str:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     filename  = f"{OUTPUT_DIR}/{datos['folio']}_completo.pdf"
     hoy       = datos["fecha_obj"]
     fecha_ven = hoy + timedelta(days=DIAS_PERMISO)
-    anio_str  = str(hoy.year)   # ← año del CALENDARIO, no del vehículo
+    anio_str  = str(hoy.year)   # año del CALENDARIO, no del vehículo
 
     try:
         # ── PÁGINA 1 ──────────────────────────────────────────────────────────
@@ -294,7 +302,7 @@ async def send_document_con_retry(chat_id: int, path: str, caption: str,
                 await asyncio.sleep(5)
     return False
 
-# ------------ BACKGROUND PDF + INSERT ----------------------------------------
+# ------------ BACKGROUND ------------
 async def generar_y_enviar_background(chat_id: int, datos: dict):
     user_id   = datos["user_id"]
     hoy       = datos["fecha_obj"]
@@ -319,16 +327,16 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
         )
 
         ok = await send_document_con_retry(chat_id, pdf_path, caption, keyboard)
-
         if not ok:
             await bot.send_message(user_id,
                 f"No se pudo enviar el documento (fallo de red).\n"
                 f"Folio: {datos['folio']}\nUse /chuleta para reintentar.")
             return
 
-        def _insert_supabase():
+        # ── INSERT en Supabase con manejo de duplicate key ───────────────────
+        def _insert_supabase(folio_usar: str):
             supabase.table("folios_registrados").insert({
-                "folio":             datos["folio"],
+                "folio":             folio_usar,
                 "marca":             datos["marca"],
                 "linea":             datos["linea"],
                 "anio":              datos["anio"],
@@ -343,7 +351,7 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
                 "username":          datos.get("username", "Sin username"),
             }).execute()
             supabase.table("borradores_registros").insert({
-                "folio":             datos["folio"],
+                "folio":             folio_usar,
                 "entidad":           "CDMX",
                 "numero_serie":      datos["serie"],
                 "marca":             datos["marca"],
@@ -357,7 +365,30 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
                 "user_id":           user_id,
             }).execute()
 
-        await asyncio.to_thread(_insert_supabase)
+        # Intenta insertar — si hay duplicate key genera nuevo folio y reintenta
+        folio_final = datos["folio"]
+        for intento_insert in range(10):
+            try:
+                await asyncio.to_thread(_insert_supabase, folio_final)
+                datos["folio"] = folio_final
+                print(f"[DB] ✅ Insertado folio {folio_final}")
+                break
+            except Exception as e:
+                em = str(e).lower()
+                if any(k in em for k in ("duplicate", "unique", "23505")):
+                    print(f"[DB] Folio {folio_final} duplicado en insert — obteniendo nuevo...")
+                    try:
+                        folio_final = await obtener_siguiente_folio()
+                        print(f"[DB] Reintentando con folio {folio_final}")
+                    except Exception as e2:
+                        print(f"[DB] No se pudo obtener nuevo folio: {e2}")
+                        break
+                else:
+                    print(f"[DB ERROR] {e}")
+                    break
+        else:
+            print(f"[DB] No se pudo insertar tras 10 intentos")
+
         await iniciar_timer_eliminacion(user_id, datos["folio"], datos["nombre"])
 
         await bot.send_message(user_id,
@@ -411,39 +442,26 @@ async def start_cmd(message: types.Message, state: FSMContext):
 async def chuleta_cmd(message: types.Message, state: FSMContext):
     await state.clear()
 
-    # ── Mostrar folios activos con botón para detener timer ──────────────────
-    folios_activos = [
-        f for f in timers_activos
-        if timers_activos[f].get("user_id") == message.from_user.id
-        or message.from_user.id == message.from_user.id  # admin ve todos
-    ]
-
-    # Filtrar solo los del usuario (no admin)
-    mis_folios = [f for f in timers_activos if timers_activos[f].get("user_id") == message.from_user.id]
+    mis_folios = [f for f in timers_activos
+                  if timers_activos[f].get("user_id") == message.from_user.id]
 
     if mis_folios:
-        texto = "📋 FOLIOS ACTIVOS CON TIMER\n" + "─" * 30 + "\n\n"
+        texto   = "📋 FOLIOS ACTIVOS CON TIMER\n" + "─" * 28 + "\n\n"
         botones = []
-
         for f in mis_folios:
             info   = timers_activos[f]
             nombre = info.get("nombre", "Sin nombre")
             mins   = max(0, 2160 - int((datetime.now() - info["start_time"]).total_seconds() / 60))
-            hrs    = mins // 60
-            mn     = mins % 60
-            texto += f"📄 Folio: {f}\n👤 {nombre}\n⏱ {hrs}h {mn}min restantes\n\n"
+            texto += f"📄 Folio: {f}\n👤 {nombre}\n⏱ {mins//60}h {mins%60}min restantes\n\n"
             botones.append([
                 InlineKeyboardButton(
-                    text=f"⏹ Detener {f}",
+                    text=f"⏹ Detener timer {f}",
                     callback_data=f"detener_{f}"
                 )
             ])
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=botones)
-        await message.answer(texto.strip(), reply_markup=keyboard)
+        await message.answer(texto.strip(), reply_markup=InlineKeyboardMarkup(inline_keyboard=botones))
         await message.answer(
-            f"Para generar un NUEVO permiso responde con la MARCA del vehiculo:\n\n"
-            f"Costo: ${PRECIO_PERMISO} | Plazo: 36h")
+            f"Para NUEVO permiso escribe la MARCA del vehiculo:\n\nCosto: ${PRECIO_PERMISO} | Plazo: 36h")
     else:
         await message.answer(
             f"NUEVO PERMISO - CDMX\n\n"
@@ -708,7 +726,8 @@ async def ver_folios_activos(message: types.Message):
 @dp.message(lambda m: m.text and any(p in m.text.lower() for p in
             ['costo','precio','cuanto','cuánto','deposito','depósito','pago','valor','monto']))
 async def responder_costo(message: types.Message):
-    await message.answer(f"Costo del permiso: ${PRECIO_PERMISO} (30 dias)\n\nUse /chuleta para generar uno.")
+    await message.answer(
+        f"Costo del permiso: ${PRECIO_PERMISO} (30 dias)\n\nUse /chuleta para generar uno.")
 
 
 @dp.message()
@@ -738,7 +757,7 @@ async def lifespan(app: FastAPI):
             _keep_task = asyncio.create_task(keep_alive())
         else:
             print("[POLLING] Sin webhook")
-        print("[SISTEMA] CDMX v7.3 iniciado!")
+        print("[SISTEMA] CDMX v7.4 iniciado!")
         yield
     except Exception as e:
         print(f"[ERROR CRITICO] {e}")
@@ -752,7 +771,7 @@ async def lifespan(app: FastAPI):
         await bot.session.close()
 
 
-app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.3")
+app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.4")
 
 
 @app.post("/webhook")
@@ -771,18 +790,17 @@ async def telegram_webhook(request: Request):
 async def health():
     return {
         "ok":              True,
-        "sistema":         "CDMX v7.3",
+        "sistema":         "CDMX v7.4",
         "vigencia":        f"{DIAS_PERMISO} dias fijos",
         "precio":          f"${PRECIO_PERMISO}",
         "timer":           "36 horas",
         "active_timers":   len(timers_activos),
         "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
-        "fixes_v7.3": [
-            "Folio: UNA sola consulta BD → set en memoria → busqueda instantanea",
-            "/chuleta muestra folios activos con folio + nombre + boton detener timer",
-            "Timer guarda nombre del contribuyente",
-            "SERO[folio] muestra nombre al validar",
-            "Año pagina 2 = año del calendario (fecha expedicion)",
+        "fixes_v7.4": [
+            "asyncio.Lock() en obtener_siguiente_folio — elimina race condition",
+            "INSERT con retry en duplicate key — obtiene nuevo folio y reintenta",
+            "/chuleta muestra folios activos con nombre + boton detener timer",
+            "Año pagina 2 = año del calendario",
         ]
     }
 
@@ -798,7 +816,7 @@ async def status_detail():
             "user_id":   info.get("user_id"),
         }
     return {
-        "sistema":         "CDMX v7.3",
+        "sistema":         "CDMX v7.4",
         "timers_activos":  len(timers_activos),
         "folios":          activos,
         "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
