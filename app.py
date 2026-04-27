@@ -195,10 +195,10 @@ def _generar_pdf_unificado(datos: dict) -> str:
         doc2  = fitz.open(PLANTILLA_BUENO)
         page2 = doc2[0]
         titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS (PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
-        page2.insert_text((135, 164), titulo,                   fontsize=6,  fontname="hebo", color=(0,0,0))
+        page2.insert_text((135, 172), titulo,                   fontsize=6,  fontname="hebo", color=(0,0,0))
         page2.insert_text((135, 192), datos["serie"],           fontsize=6,  fontname="hebo", color=(0,0,0))
         page2.insert_text((135, 200), anio_str,                 fontsize=6,  fontname="hebo", color=(0,0,0))
-        page2.insert_text((335, 346), f"${PRECIO_PERMISO}",     fontsize=12, fontname="hebo", color=(0,0,0))
+        page2.insert_text((335, 376), f"${PRECIO_PERMISO}",     fontsize=12, fontname="hebo", color=(0,0,0))
         page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"), fontsize=6,  fontname="hebo", color=(0,0,0))
         doc1.insert_pdf(doc2)
         doc2.close()
