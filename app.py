@@ -45,6 +45,32 @@ folio_counter      = {"siguiente": 1}
 MAX_INTENTOS_FOLIO = 100_000
 _folio_lock        = asyncio.Lock()
 
+# ── WATERMARK: el numero mas alto jamas asignado ──────────────────────────────
+
+def _sb_leer_watermark() -> int | None:
+    """Regresa el ultimo numero asignado persistido, o None si no existe."""
+    try:
+        r = supabase.table("folio_watermark").select("ultimo_asignado").eq("prefijo", FOLIO_PREFIJO).execute()
+        if r.data:
+            return r.data[0]["ultimo_asignado"]
+        return None
+    except Exception as e:
+        print(f"[ERROR] leer_watermark: {e}")
+        return None
+
+def _sb_guardar_watermark(numero: int):
+    """Persiste el maximo folio asignado. Solo avanza, nunca retrocede."""
+    try:
+        supabase.table("folio_watermark").upsert({
+            "prefijo": FOLIO_PREFIJO,
+            "ultimo_asignado": numero
+        }).execute()
+        print(f"[WATERMARK] Guardado: {FOLIO_PREFIJO}{numero}")
+    except Exception as e:
+        print(f"[ERROR] guardar_watermark: {e}")
+
+# ── FOLIO ─────────────────────────────────────────────────────────────────────
+
 def _sb_folio_existe(folio: str) -> bool:
     try:
         r = supabase.table("folios_registrados").select("folio").eq("folio", folio).execute()
@@ -59,6 +85,7 @@ def _sb_obtener_siguiente_folio() -> str:
         folio = f"{FOLIO_PREFIJO}{candidato}"
         if not _sb_folio_existe(folio):
             folio_counter["siguiente"] = candidato + 1
+            _sb_guardar_watermark(candidato)   # <-- persiste el maximo
             print(f"[FOLIO] Asignado: {folio}  (siguiente: {folio_counter['siguiente']})")
             return folio
         print(f"[FOLIO] {folio} ocupado -> probando siguiente")
@@ -66,7 +93,20 @@ def _sb_obtener_siguiente_folio() -> str:
     raise Exception("Sin folio disponible — limite alcanzado")
 
 def _sb_inicializar_folio():
+    """
+    Al arrancar:
+    1) Lee el watermark persistido (maximo numero jamas asignado).
+    2) Si no existe watermark, hace fallback buscando el maximo en DB activa.
+    3) El contador NUNCA baja, aunque haya folios borrados.
+    """
     try:
+        watermark = _sb_leer_watermark()
+        if watermark is not None:
+            folio_counter["siguiente"] = watermark + 1
+            print(f"[INFO] Folio desde watermark: {FOLIO_PREFIJO}{watermark} -> siguiente: {folio_counter['siguiente']}")
+            return
+
+        # Fallback primera vez (watermark aun no existe)
         r = supabase.table("folios_registrados").select("folio").like("folio", f"{FOLIO_PREFIJO}%").execute()
         consecutivos = []
         for row in r.data or []:
@@ -78,10 +118,11 @@ def _sb_inicializar_folio():
         if consecutivos:
             maximo = max(consecutivos)
             folio_counter["siguiente"] = maximo + 1
-            print(f"[INFO] Folio inicializado maximo: {FOLIO_PREFIJO}{maximo} siguiente: {folio_counter['siguiente']}")
+            _sb_guardar_watermark(maximo)   # crea el watermark la primera vez
+            print(f"[INFO] Folio desde DB (primera vez): {FOLIO_PREFIJO}{maximo} -> siguiente: {folio_counter['siguiente']}")
         else:
             folio_counter["siguiente"] = 1
-            print("[INFO] Sin folios 122 previos empezando desde 1221")
+            print("[INFO] Sin folios 122 previos, empezando desde 1221")
     except Exception as e:
         print(f"[ERROR] inicializar_folio: {e}")
         folio_counter["siguiente"] = 1
@@ -93,7 +134,11 @@ async def obtener_siguiente_folio() -> str:
 def obtener_folios_usuario(user_id: int) -> list:
     return user_folios.get(user_id, [])
 
+# ── TIMER / EXPIRACIÓN ────────────────────────────────────────────────────────
+
 async def eliminar_folio_automatico(folio: str):
+    """Borra el folio de DB cuando expira el timer. El watermark ya esta
+    guardado desde que se asigno, asi que el contador no retrocede."""
     try:
         uid = timers_activos.get(folio, {}).get("user_id")
         await asyncio.to_thread(lambda: supabase.table("folios_registrados").delete().eq("folio", folio).execute())
@@ -543,7 +588,7 @@ async def lifespan(app: FastAPI):
             _keep_task = asyncio.create_task(keep_alive())
         else:
             print("[POLLING] Sin webhook")
-        print("[SISTEMA] CDMX v7.4 iniciado!")
+        print("[SISTEMA] CDMX v7.5 iniciado!")
         yield
     except Exception as e:
         print(f"[ERROR CRITICO] {e}")
@@ -556,7 +601,7 @@ async def lifespan(app: FastAPI):
                 await _keep_task
         await bot.session.close()
 
-app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.4")
+app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.5")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -571,7 +616,7 @@ async def telegram_webhook(request: Request):
 
 @app.get("/")
 async def health():
-    return {"ok": True, "sistema": "CDMX v7.4", "vigencia": f"{DIAS_PERMISO} dias", "precio": f"${PRECIO_PERMISO}", "timer": "36 horas", "active_timers": len(timers_activos), "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}"}
+    return {"ok": True, "sistema": "CDMX v7.5", "vigencia": f"{DIAS_PERMISO} dias", "precio": f"${PRECIO_PERMISO}", "timer": "36 horas", "active_timers": len(timers_activos), "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}"}
 
 @app.get("/status")
 async def status_detail():
@@ -579,7 +624,7 @@ async def status_detail():
     for f, info in timers_activos.items():
         mins = max(0, 2160 - int((datetime.now() - info["start_time"]).total_seconds() / 60))
         activos[f] = {"nombre": info.get("nombre", ""), "restantes": f"{mins//60}h {mins%60}min", "user_id": info.get("user_id")}
-    return {"sistema": "CDMX v7.4", "timers_activos": len(timers_activos), "folios": activos, "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}", "timestamp": datetime.now().isoformat()}
+    return {"sistema": "CDMX v7.5", "timers_activos": len(timers_activos), "folios": activos, "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}", "timestamp": datetime.now().isoformat()}
 
 if __name__ == "__main__":
     import uvicorn
