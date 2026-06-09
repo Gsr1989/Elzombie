@@ -1,4 +1,3 @@
-Este ya tiene watermark y background task. Solo es cambiar /chuleta → /banamex en todo el archivo:
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 import fitz
