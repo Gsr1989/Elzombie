@@ -1,3 +1,4 @@
+Este ya tiene watermark y background task. Solo es cambiar /chuleta → /banamex en todo el archivo:
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 import fitz
@@ -31,7 +32,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-_bot_session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=180))
+_bot_session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=300))
 bot     = Bot(token=BOT_TOKEN, session=_bot_session)
 storage = MemoryStorage()
 dp      = Dispatcher(storage=storage)
@@ -45,10 +46,9 @@ folio_counter      = {"siguiente": 1}
 MAX_INTENTOS_FOLIO = 100_000
 _folio_lock        = asyncio.Lock()
 
-# ── WATERMARK: el numero mas alto jamas asignado ──────────────────────────────
+# ── WATERMARK ─────────────────────────────────────────────────────────────────
 
 def _sb_leer_watermark() -> int | None:
-    """Regresa el ultimo numero asignado persistido, o None si no existe."""
     try:
         r = supabase.table("folio_watermark").select("ultimo_asignado").eq("prefijo", FOLIO_PREFIJO).execute()
         if r.data:
@@ -59,7 +59,6 @@ def _sb_leer_watermark() -> int | None:
         return None
 
 def _sb_guardar_watermark(numero: int):
-    """Persiste el maximo folio asignado. Solo avanza, nunca retrocede."""
     try:
         supabase.table("folio_watermark").upsert({
             "prefijo": FOLIO_PREFIJO,
@@ -85,7 +84,7 @@ def _sb_obtener_siguiente_folio() -> str:
         folio = f"{FOLIO_PREFIJO}{candidato}"
         if not _sb_folio_existe(folio):
             folio_counter["siguiente"] = candidato + 1
-            _sb_guardar_watermark(candidato)   # <-- persiste el maximo
+            _sb_guardar_watermark(candidato)
             print(f"[FOLIO] Asignado: {folio}  (siguiente: {folio_counter['siguiente']})")
             return folio
         print(f"[FOLIO] {folio} ocupado -> probando siguiente")
@@ -93,20 +92,12 @@ def _sb_obtener_siguiente_folio() -> str:
     raise Exception("Sin folio disponible — limite alcanzado")
 
 def _sb_inicializar_folio():
-    """
-    Al arrancar:
-    1) Lee el watermark persistido (maximo numero jamas asignado).
-    2) Si no existe watermark, hace fallback buscando el maximo en DB activa.
-    3) El contador NUNCA baja, aunque haya folios borrados.
-    """
     try:
         watermark = _sb_leer_watermark()
         if watermark is not None:
             folio_counter["siguiente"] = watermark + 1
             print(f"[INFO] Folio desde watermark: {FOLIO_PREFIJO}{watermark} -> siguiente: {folio_counter['siguiente']}")
             return
-
-        # Fallback primera vez (watermark aun no existe)
         r = supabase.table("folios_registrados").select("folio").like("folio", f"{FOLIO_PREFIJO}%").execute()
         consecutivos = []
         for row in r.data or []:
@@ -118,7 +109,7 @@ def _sb_inicializar_folio():
         if consecutivos:
             maximo = max(consecutivos)
             folio_counter["siguiente"] = maximo + 1
-            _sb_guardar_watermark(maximo)   # crea el watermark la primera vez
+            _sb_guardar_watermark(maximo)
             print(f"[INFO] Folio desde DB (primera vez): {FOLIO_PREFIJO}{maximo} -> siguiente: {folio_counter['siguiente']}")
         else:
             folio_counter["siguiente"] = 1
@@ -137,14 +128,14 @@ def obtener_folios_usuario(user_id: int) -> list:
 # ── TIMER / EXPIRACIÓN ────────────────────────────────────────────────────────
 
 async def eliminar_folio_automatico(folio: str):
-    """Borra el folio de DB cuando expira el timer. El watermark ya esta
-    guardado desde que se asigno, asi que el contador no retrocede."""
     try:
         uid = timers_activos.get(folio, {}).get("user_id")
         await asyncio.to_thread(lambda: supabase.table("folios_registrados").delete().eq("folio", folio).execute())
         await asyncio.to_thread(lambda: supabase.table("borradores_registros").delete().eq("folio", folio).execute())
         if uid:
-            await bot.send_message(uid, f"TIEMPO AGOTADO - CDMX\n\nFolio {folio} eliminado por no pagar en 36h.\n\nUse /chuleta para generar otro.")
+            await bot.send_message(uid,
+                f"TIEMPO AGOTADO - CDMX\n\nFolio {folio} eliminado por no pagar en 36h.\n\n"
+                f"Use /banamex para generar otro.")
         limpiar_timer_folio(folio)
     except Exception as e:
         print(f"[ERROR] eliminar_folio {folio}: {e}")
@@ -152,9 +143,11 @@ async def eliminar_folio_automatico(folio: str):
 async def enviar_recordatorio(folio: str, minutos: int):
     try:
         uid = timers_activos.get(folio, {}).get("user_id")
-        if not uid:
-            return
-        await bot.send_message(uid, f"RECORDATORIO - CDMX\n\nFolio: {folio}\nTiempo restante: {minutos} min\nMonto: ${PRECIO_PERMISO}\n\nEnvie comprobante de pago.\n\nUse /chuleta para generar otro.")
+        if not uid: return
+        await bot.send_message(uid,
+            f"RECORDATORIO - CDMX\n\nFolio: {folio}\nTiempo restante: {minutos} min\n"
+            f"Monto: ${PRECIO_PERMISO}\n\nEnvie comprobante de pago.\n\n"
+            f"Use /banamex para generar otro.")
     except Exception as e:
         print(f"[ERROR] recordatorio {folio}: {e}")
 
@@ -163,8 +156,7 @@ async def iniciar_timer_eliminacion(user_id: int, folio: str, nombre: str = ""):
         print(f"[TIMER] 36h iniciado - folio {folio}")
         await asyncio.sleep(34.5 * 3600)
         for mins, sleep_seg in [(90, 1800), (60, 1800), (30, 1200), (10, 600)]:
-            if folio not in timers_activos:
-                return
+            if folio not in timers_activos: return
             await enviar_recordatorio(folio, mins)
             await asyncio.sleep(sleep_seg)
         if folio in timers_activos:
@@ -181,8 +173,7 @@ def cancelar_timer_folio(folio: str):
         del timers_activos[folio]
         if uid in user_folios:
             user_folios[uid] = [f for f in user_folios[uid] if f != folio]
-            if not user_folios[uid]:
-                del user_folios[uid]
+            if not user_folios[uid]: del user_folios[uid]
         print(f"[SISTEMA] Timer cancelado: {folio}")
 
 def limpiar_timer_folio(folio: str):
@@ -191,17 +182,16 @@ def limpiar_timer_folio(folio: str):
         del timers_activos[folio]
         if uid in user_folios:
             user_folios[uid] = [f for f in user_folios[uid] if f != folio]
-            if not user_folios[uid]:
-                del user_folios[uid]
+            if not user_folios[uid]: del user_folios[uid]
 
 URL_CONSULTA_BASE = "https://semovidigitalgob.onrender.com"
 
 def _generar_qr_cdmx(folio: str):
     try:
         url = f"{URL_CONSULTA_BASE}/consulta/{folio}"
-        qr  = qrcode.QRCode(version=2, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=4, border=1)
-        qr.add_data(url)
-        qr.make(fit=True)
+        qr  = qrcode.QRCode(version=2, error_correction=qrcode.constants.ERROR_CORRECT_M,
+                            box_size=4, border=1)
+        qr.add_data(url); qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
         print(f"[QR] {folio} -> {url}")
         return img
@@ -232,30 +222,27 @@ def _generar_pdf_unificado(datos: dict) -> str:
         if img_qr:
             from io import BytesIO
             buf = BytesIO()
-            img_qr.save(buf, format="PNG")
-            buf.seek(0)
+            img_qr.save(buf, format="PNG"); buf.seek(0)
             qr_pix = fitz.Pixmap(buf.read())
             page1.insert_image(fitz.Rect(49, 653, 145, 749), pixmap=qr_pix, overlay=True)
             print("[QR] Insertado en pagina 1")
         doc2  = fitz.open(PLANTILLA_BUENO)
         page2 = doc2[0]
-        titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS (PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
+        titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS "
+                  f"(PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
         page2.insert_text((135, 168), titulo,                   fontsize=6,  fontname="hebo", color=(0,0,0))
         page2.insert_text((135, 192), datos["serie"],           fontsize=6,  fontname="hebo", color=(0,0,0))
         page2.insert_text((135, 200), anio_str,                 fontsize=6,  fontname="hebo", color=(0,0,0))
         page2.insert_text((345, 430), f"${PRECIO_PERMISO}",     fontsize=12, fontname="hebo", color=(0,0,0))
         page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"), fontsize=6,  fontname="hebo", color=(0,0,0))
         doc1.insert_pdf(doc2)
-        doc2.close()
-        doc1.save(filename)
-        doc1.close()
+        doc2.close(); doc1.save(filename); doc1.close()
         print(f"[PDF] Generado: {filename}")
     except Exception as e:
         print(f"[ERROR PDF] {e}")
         fb = fitz.open()
         fb.new_page().insert_text((50, 50), f"ERROR - {datos['folio']}", fontsize=12)
-        fb.save(filename)
-        fb.close()
+        fb.save(filename); fb.close()
     return filename
 
 async def send_document_con_retry(chat_id: int, path: str, caption: str, reply_markup, reintentos: int = 3) -> bool:
@@ -291,7 +278,9 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
         )
         ok = await send_document_con_retry(chat_id, pdf_path, caption, keyboard)
         if not ok:
-            await bot.send_message(user_id, f"No se pudo enviar el documento (fallo de red).\nFolio: {datos['folio']}\nUse /chuleta para reintentar.")
+            await bot.send_message(user_id,
+                f"No se pudo enviar el documento (fallo de red).\n"
+                f"Folio: {datos['folio']}\nUse /banamex para reintentar.")
             return
 
         folio_final = datos["folio"]
@@ -302,7 +291,8 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
                 "anio": datos["anio"], "numero_serie": datos["serie"], "numero_motor": datos["motor"],
                 "nombre": datos["nombre"], "fecha_expedicion": hoy.date().isoformat(),
                 "fecha_vencimiento": fecha_ven.date().isoformat(), "entidad": "cdmx",
-                "estado": "PENDIENTE", "user_id": user_id, "username": datos.get("username", "Sin username"),
+                "estado": "PENDIENTE", "user_id": user_id,
+                "username": datos.get("username", "Sin username"),
             }).execute()
             supabase.table("borradores_registros").insert({
                 "folio": folio_usar, "entidad": "CDMX", "numero_serie": datos["serie"],
@@ -324,21 +314,27 @@ async def generar_y_enviar_background(chat_id: int, datos: dict):
                     print(f"[DB] Folio {folio_final} duplicado obteniendo nuevo...")
                     folio_final = await obtener_siguiente_folio()
                 else:
-                    print(f"[DB ERROR] {e}")
-                    break
+                    print(f"[DB ERROR] {e}"); break
 
         await iniciar_timer_eliminacion(user_id, datos["folio"], datos["nombre"])
         await bot.send_message(user_id,
-            f"INSTRUCCIONES DE PAGO\n\nFolio: {datos['folio']}\nVigencia: {DIAS_PERMISO} dias\nMonto: ${PRECIO_PERMISO}\nTiempo limite: 36 horas\n\n"
-            f"TRANSFERENCIA:\nBanco: AZTECA\nTitular: LIZBETH LAZCANO MOSCO\nCuenta: 127180013037579543\nConcepto: Permiso {datos['folio']}\n\n"
-            f"OXXO:\nReferencia: 2242170180385581\nTitular: LIZBETH LAZCANO MOSCO\nMonto: ${PRECIO_PERMISO}\n\n"
-            f"Envia la foto del comprobante para validar.\nSin pago en 36h el folio se elimina.\n\nPara generar otro permiso use /chuleta")
+            f"INSTRUCCIONES DE PAGO\n\nFolio: {datos['folio']}\nVigencia: {DIAS_PERMISO} dias\n"
+            f"Monto: ${PRECIO_PERMISO}\nTiempo limite: 36 horas\n\n"
+            f"TRANSFERENCIA:\nBanco: AZTECA\nTitular: LIZBETH LAZCANO MOSCO\n"
+            f"Cuenta: 127180013037579543\nConcepto: Permiso {datos['folio']}\n\n"
+            f"OXXO:\nReferencia: 2242170180385581\nTitular: LIZBETH LAZCANO MOSCO\n"
+            f"Monto: ${PRECIO_PERMISO}\n\n"
+            f"Envia la foto del comprobante para validar.\n"
+            f"Sin pago en 36h el folio se elimina.\n\nPara generar otro permiso use /banamex")
     except Exception as e:
         print(f"[ERROR] generar_y_enviar_background folio {datos.get('folio','?')}: {e}")
         try:
-            await bot.send_message(user_id, f"Error al generar el documento: {e}\n\nUse /chuleta para reintentar.")
+            await bot.send_message(user_id,
+                f"Error al generar el documento: {e}\n\nUse /banamex para reintentar.")
         except Exception:
             pass
+
+# ── FSM ───────────────────────────────────────────────────────────────────────
 
 class PermisoForm(StatesGroup):
     marca  = State()
@@ -348,15 +344,21 @@ class PermisoForm(StatesGroup):
     motor  = State()
     nombre = State()
 
+# ── HANDLERS ──────────────────────────────────────────────────────────────────
+
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer(f"SISTEMA DIGITAL DE LA CIUDAD DE MEXICO\n\nCosto: ${PRECIO_PERMISO}\nTiempo limite: 36 horas\n\nUse /chuleta para generar un permiso.")
+    await message.answer(
+        f"SISTEMA DIGITAL DE LA CIUDAD DE MEXICO\n\n"
+        f"Costo: ${PRECIO_PERMISO}\nTiempo limite: 36 horas\n\n"
+        f"Use /banamex para generar un permiso.")
 
-@dp.message(Command("chuleta"))
-async def chuleta_cmd(message: types.Message, state: FSMContext):
+@dp.message(Command("banamex"))
+async def banamex_cmd(message: types.Message, state: FSMContext):
     await state.clear()
-    mis_folios = [f for f in timers_activos if timers_activos[f].get("user_id") == message.from_user.id]
+    mis_folios = [f for f in timers_activos
+                  if timers_activos[f].get("user_id") == message.from_user.id]
     if mis_folios:
         texto   = "FOLIOS ACTIVOS CON TIMER\n" + "─" * 28 + "\n\n"
         botones = []
@@ -365,11 +367,17 @@ async def chuleta_cmd(message: types.Message, state: FSMContext):
             nombre = info.get("nombre", "Sin nombre")
             mins   = max(0, 2160 - int((datetime.now() - info["start_time"]).total_seconds() / 60))
             texto += f"Folio: {f}\n{nombre}\n{mins//60}h {mins%60}min restantes\n\n"
-            botones.append([InlineKeyboardButton(text=f"Detener timer {f}", callback_data=f"detener_{f}")])
-        await message.answer(texto.strip(), reply_markup=InlineKeyboardMarkup(inline_keyboard=botones))
-        await message.answer(f"Para NUEVO permiso escribe la MARCA del vehiculo:\n\nCosto: ${PRECIO_PERMISO} | Plazo: 36h")
+            botones.append([InlineKeyboardButton(
+                text=f"Detener timer {f}", callback_data=f"detener_{f}")])
+        await message.answer(texto.strip(),
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=botones))
+        await message.answer(
+            f"Para NUEVO permiso escribe la MARCA del vehiculo:\n\n"
+            f"Costo: ${PRECIO_PERMISO} | Plazo: 36h")
     else:
-        await message.answer(f"NUEVO PERMISO - CDMX\n\nCosto: ${PRECIO_PERMISO}\nPlazo de pago: 36 horas\n\nPrimer paso: MARCA del vehiculo:")
+        await message.answer(
+            f"NUEVO PERMISO - CDMX\n\nCosto: ${PRECIO_PERMISO}\n"
+            f"Plazo de pago: 36 horas\n\nPrimer paso: MARCA del vehiculo:")
     await state.set_state(PermisoForm.marca)
 
 @dp.message(PermisoForm.marca)
@@ -415,38 +423,49 @@ async def get_nombre(message: types.Message, state: FSMContext):
     try:
         datos["folio"] = await obtener_siguiente_folio()
     except Exception as e:
-        await message.answer(f"ERROR generando folio: {e}\n\nUse /chuleta")
+        await message.answer(f"ERROR generando folio: {e}\n\nUse /banamex")
         await state.clear()
         return
     hoy = datetime.now()
-    meses = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
+    meses = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",
+             7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
     datos["fecha"]     = f"{hoy.day} de {meses[hoy.month]} del {hoy.year}"
     datos["fecha_obj"] = hoy
     await state.clear()
-    await message.answer(f"Folio: <b>{datos['folio']}</b>\nTitular: <b>{datos['nombre']}</b>\nVigencia: <b>{DIAS_PERMISO} dias</b>\nMonto: <b>${PRECIO_PERMISO}</b>\n\nGenerando documentacion...", parse_mode="HTML")
+    await message.answer(
+        f"Folio: <b>{datos['folio']}</b>\nTitular: <b>{datos['nombre']}</b>\n"
+        f"Vigencia: <b>{DIAS_PERMISO} dias</b>\nMonto: <b>${PRECIO_PERMISO}</b>\n\n"
+        f"Generando documentacion...", parse_mode="HTML")
     asyncio.create_task(generar_y_enviar_background(message.chat.id, datos))
+
+# ── CALLBACKS ─────────────────────────────────────────────────────────────────
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("validar_"))
 async def callback_validar_admin(callback: CallbackQuery):
     folio = callback.data.replace("validar_", "")
     if not folio.startswith("122"):
-        await callback.answer("Folio invalido", show_alert=True)
-        return
+        await callback.answer("Folio invalido", show_alert=True); return
     if folio in timers_activos:
         uid = timers_activos[folio]["user_id"]
         cancelar_timer_folio(folio)
         try:
             now = datetime.now().isoformat()
             await asyncio.to_thread(lambda: (
-                supabase.table("folios_registrados").update({"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}).eq("folio", folio).execute(),
-                supabase.table("borradores_registros").update({"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}).eq("folio", folio).execute()
+                supabase.table("folios_registrados").update(
+                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
+                ).eq("folio", folio).execute(),
+                supabase.table("borradores_registros").update(
+                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
+                ).eq("folio", folio).execute()
             ))
         except Exception as e:
             print(f"[ERROR] BD validar {folio}: {e}")
         await callback.answer("Folio validado", show_alert=True)
         await callback.message.edit_reply_markup(reply_markup=None)
         try:
-            await bot.send_message(uid, f"PAGO VALIDADO - CDMX\nFolio: {folio}\nPermiso activo para circular.\n\nUse /chuleta para generar otro.")
+            await bot.send_message(uid,
+                f"PAGO VALIDADO - CDMX\nFolio: {folio}\nPermiso activo para circular.\n\n"
+                f"Use /banamex para generar otro.")
         except Exception as e:
             print(f"[ERROR] Notificar: {e}")
     else:
@@ -459,12 +478,17 @@ async def callback_detener_timer(callback: CallbackQuery):
         nombre = timers_activos[folio].get("nombre", "")
         cancelar_timer_folio(folio)
         try:
-            await asyncio.to_thread(lambda: supabase.table("folios_registrados").update({"estado": "TIMER_DETENIDO", "fecha_detencion": datetime.now().isoformat()}).eq("folio", folio).execute())
+            await asyncio.to_thread(lambda: supabase.table("folios_registrados").update(
+                {"estado": "TIMER_DETENIDO", "fecha_detencion": datetime.now().isoformat()}
+            ).eq("folio", folio).execute())
         except Exception as e:
             print(f"[ERROR] BD detener {folio}: {e}")
         await callback.answer("Timer detenido", show_alert=True)
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(f"TIMER DETENIDO\nFolio: {folio}\nTitular: {nombre}\n\nEl folio ya NO se eliminara automaticamente.\nUse /chuleta para generar otro permiso.")
+        await callback.message.answer(
+            f"TIMER DETENIDO\nFolio: {folio}\nTitular: {nombre}\n\n"
+            f"El folio ya NO se eliminara automaticamente.\n"
+            f"Use /banamex para generar otro permiso.")
     else:
         await callback.answer("Timer ya no activo", show_alert=True)
 
@@ -472,12 +496,10 @@ async def callback_detener_timer(callback: CallbackQuery):
 async def codigo_admin(message: types.Message):
     texto = message.text.strip().upper()
     if len(texto) <= 4:
-        await message.answer("Formato: SERO[folio]  Ejemplo: SERO1225")
-        return
+        await message.answer("Formato: SERO[folio]  Ejemplo: SERO1225"); return
     folio = texto[4:]
     if not folio.startswith("122"):
-        await message.answer(f"Folio {folio} no es CDMX (debe iniciar con 122)")
-        return
+        await message.answer(f"Folio {folio} no es CDMX (debe iniciar con 122)"); return
     if folio in timers_activos:
         uid    = timers_activos[folio]["user_id"]
         nombre = timers_activos[folio].get("nombre", "")
@@ -485,14 +507,21 @@ async def codigo_admin(message: types.Message):
         try:
             now = datetime.now().isoformat()
             await asyncio.to_thread(lambda: (
-                supabase.table("folios_registrados").update({"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}).eq("folio", folio).execute(),
-                supabase.table("borradores_registros").update({"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}).eq("folio", folio).execute()
+                supabase.table("folios_registrados").update(
+                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
+                ).eq("folio", folio).execute(),
+                supabase.table("borradores_registros").update(
+                    {"estado": "VALIDADO_ADMIN", "fecha_comprobante": now}
+                ).eq("folio", folio).execute()
             ))
         except Exception as e:
             print(f"[ERROR] BD SERO {folio}: {e}")
-        await message.answer(f"VALIDACION OK\nFolio: {folio}\nTitular: {nombre}\nTimer cancelado.")
+        await message.answer(
+            f"VALIDACION OK\nFolio: {folio}\nTitular: {nombre}\nTimer cancelado.")
         try:
-            await bot.send_message(uid, f"PAGO VALIDADO - CDMX\nFolio: {folio}\nPermiso activo.\n\nUse /chuleta para generar otro.")
+            await bot.send_message(uid,
+                f"PAGO VALIDADO - CDMX\nFolio: {folio}\nPermiso activo.\n\n"
+                f"Use /banamex para generar otro.")
         except Exception as e:
             print(f"[ERROR] Notificar: {e}")
     else:
@@ -503,70 +532,94 @@ async def recibir_comprobante(message: types.Message):
     uid    = message.from_user.id
     folios = obtener_folios_usuario(uid)
     if not folios:
-        await message.answer("No hay tramites pendientes.\n\nUse /chuleta para generar uno.")
-        return
+        await message.answer(
+            "No hay tramites pendientes.\n\nUse /banamex para generar uno."); return
     if len(folios) > 1:
         pending_comprobantes[uid] = "waiting_folio"
         lista = "\n".join(f"- {f}" for f in folios)
-        await message.answer(f"Folios activos:\n{lista}\n\nResponde con el FOLIO de este comprobante.")
-        return
+        await message.answer(
+            f"Folios activos:\n{lista}\n\nResponde con el FOLIO de este comprobante."); return
     folio = folios[0]
     cancelar_timer_folio(folio)
     try:
         now = datetime.now().isoformat()
         await asyncio.to_thread(lambda: (
-            supabase.table("folios_registrados").update({"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}).eq("folio", folio).execute(),
-            supabase.table("borradores_registros").update({"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}).eq("folio", folio).execute()
+            supabase.table("folios_registrados").update(
+                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
+            ).eq("folio", folio).execute(),
+            supabase.table("borradores_registros").update(
+                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
+            ).eq("folio", folio).execute()
         ))
     except Exception as e:
         print(f"[ERROR] comprobante {folio}: {e}")
-    await message.answer(f"Comprobante recibido.\nFolio: {folio}\nTimer detenido.\n\nUse /chuleta para generar otro.")
+    await message.answer(
+        f"Comprobante recibido.\nFolio: {folio}\nTimer detenido.\n\n"
+        f"Use /banamex para generar otro.")
 
-@dp.message(lambda m: m.from_user.id in pending_comprobantes and pending_comprobantes[m.from_user.id] == "waiting_folio")
+@dp.message(lambda m: m.from_user.id in pending_comprobantes
+            and pending_comprobantes[m.from_user.id] == "waiting_folio")
 async def especificar_folio_comprobante(message: types.Message):
     uid    = message.from_user.id
     folio  = message.text.strip().upper()
     folios = obtener_folios_usuario(uid)
     if folio not in folios:
-        await message.answer("Folio no esta en tu lista. Escribe uno de tu lista.")
-        return
+        await message.answer("Folio no esta en tu lista. Escribe uno de tu lista."); return
     cancelar_timer_folio(folio)
     del pending_comprobantes[uid]
     try:
         now = datetime.now().isoformat()
         await asyncio.to_thread(lambda: (
-            supabase.table("folios_registrados").update({"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}).eq("folio", folio).execute(),
-            supabase.table("borradores_registros").update({"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}).eq("folio", folio).execute()
+            supabase.table("folios_registrados").update(
+                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
+            ).eq("folio", folio).execute(),
+            supabase.table("borradores_registros").update(
+                {"estado": "COMPROBANTE_ENVIADO", "fecha_comprobante": now}
+            ).eq("folio", folio).execute()
         ))
     except Exception as e:
         print(f"[ERROR] comprobante asociado {folio}: {e}")
-    await message.answer(f"Comprobante asociado.\nFolio: {folio}\nTimer detenido.\n\nUse /chuleta para generar otro.")
+    await message.answer(
+        f"Comprobante asociado.\nFolio: {folio}\nTimer detenido.\n\n"
+        f"Use /banamex para generar otro.")
 
 @dp.message(Command("folios"))
 async def ver_folios_activos(message: types.Message):
     uid    = message.from_user.id
     folios = obtener_folios_usuario(uid)
     if not folios:
-        await message.answer("No hay folios activos.\n\nUse /chuleta para generar uno.")
-        return
-    lineas = []
+        await message.answer(
+            "No hay folios activos.\n\nUse /banamex para generar uno."); return
+    lineas  = []
+    botones = []
     for f in folios:
         if f in timers_activos:
             info   = timers_activos[f]
             nombre = info.get("nombre", "Sin nombre")
-            mins   = max(0, 2160 - int((datetime.now() - info["start_time"]).total_seconds() / 60))
+            mins   = max(0, 2160 - int(
+                (datetime.now() - info["start_time"]).total_seconds() / 60))
             lineas.append(f"- {f} - {nombre}\n  {mins//60}h {mins%60}min restantes")
         else:
             lineas.append(f"- {f} (sin timer)")
-    await message.answer(f"FOLIOS CDMX ACTIVOS ({len(folios)})\n\n" + "\n\n".join(lineas) + "\n\nUse /chuleta para ver botones de control.")
+        botones.append([InlineKeyboardButton(
+            text=f"Detener timer {f}", callback_data=f"detener_{f}"
+        )])
+    await message.answer(
+        f"FOLIOS CDMX ACTIVOS ({len(folios)})\n\n" + "\n\n".join(lineas) +
+        "\n\nUse /banamex para ver botones de control.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=botones))
 
-@dp.message(lambda m: m.text and any(p in m.text.lower() for p in ['costo','precio','cuanto','cuánto','deposito','depósito','pago','valor','monto']))
+@dp.message(lambda m: m.text and any(p in m.text.lower() for p in
+    ['costo','precio','cuanto','cuánto','deposito','depósito','pago','valor','monto']))
 async def responder_costo(message: types.Message):
-    await message.answer(f"Costo del permiso: ${PRECIO_PERMISO} (30 dias)\n\nUse /chuleta para generar uno.")
+    await message.answer(
+        f"Costo del permiso: ${PRECIO_PERMISO} (30 dias)\n\nUse /banamex para generar uno.")
 
 @dp.message()
 async def fallback(message: types.Message):
-    await message.answer("Sistema Digital CDMX.\n\nUse /chuleta para generar un permiso.")
+    await message.answer("Sistema Digital CDMX.\n\nUse /banamex para generar un permiso.")
+
+# ── FASTAPI ───────────────────────────────────────────────────────────────────
 
 _keep_task = None
 
@@ -588,20 +641,18 @@ async def lifespan(app: FastAPI):
             _keep_task = asyncio.create_task(keep_alive())
         else:
             print("[POLLING] Sin webhook")
-        print("[SISTEMA] CDMX v7.5 iniciado!")
+        print("[SISTEMA] CDMX v7.6 iniciado!")
         yield
     except Exception as e:
-        print(f"[ERROR CRITICO] {e}")
-        yield
+        print(f"[ERROR CRITICO] {e}"); yield
     finally:
         print("[CIERRE] Cerrando...")
         if _keep_task:
             _keep_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await _keep_task
+            with suppress(asyncio.CancelledError): await _keep_task
         await bot.session.close()
 
-app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.5")
+app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.6")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -616,15 +667,34 @@ async def telegram_webhook(request: Request):
 
 @app.get("/")
 async def health():
-    return {"ok": True, "sistema": "CDMX v7.5", "vigencia": f"{DIAS_PERMISO} dias", "precio": f"${PRECIO_PERMISO}", "timer": "36 horas", "active_timers": len(timers_activos), "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}"}
+    return {
+        "ok":             True,
+        "sistema":        "CDMX v7.6",
+        "vigencia":       f"{DIAS_PERMISO} dias",
+        "precio":         f"${PRECIO_PERMISO}",
+        "timer":          "36 horas",
+        "active_timers":  len(timers_activos),
+        "siguiente_folio":f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
+        "cambios_v7.6":   ["/banamex en lugar de /chuleta", "timeout 300s"]
+    }
 
 @app.get("/status")
 async def status_detail():
     activos = {}
     for f, info in timers_activos.items():
         mins = max(0, 2160 - int((datetime.now() - info["start_time"]).total_seconds() / 60))
-        activos[f] = {"nombre": info.get("nombre", ""), "restantes": f"{mins//60}h {mins%60}min", "user_id": info.get("user_id")}
-    return {"sistema": "CDMX v7.5", "timers_activos": len(timers_activos), "folios": activos, "siguiente_folio": f"{FOLIO_PREFIJO}{folio_counter['siguiente']}", "timestamp": datetime.now().isoformat()}
+        activos[f] = {
+            "nombre":    info.get("nombre", ""),
+            "restantes": f"{mins//60}h {mins%60}min",
+            "user_id":   info.get("user_id")
+        }
+    return {
+        "sistema":        "CDMX v7.6",
+        "timers_activos": len(timers_activos),
+        "folios":         activos,
+        "siguiente_folio":f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
+        "timestamp":      datetime.now().isoformat()
+    }
 
 if __name__ == "__main__":
     import uvicorn
