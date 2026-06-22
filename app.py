@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from supabase import create_client, Client
 import fitz
 import os
+import threading
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -45,6 +46,14 @@ folio_counter      = {"siguiente": 1}
 MAX_INTENTOS_FOLIO = 100_000
 _folio_lock        = asyncio.Lock()
 
+# ── LOCK GLOBAL PDF ───────────────────────────────────────────────────────────
+# PyMuPDF (fitz) NO es thread-safe. _generar_pdf_unificado se llama vía
+# asyncio.to_thread, lo cual usa hilos reales del threadpool. Si dos personas
+# generan permiso casi al mismo tiempo, sin este Lock los PDFs se corrompen
+# entre sí (página a medias, faltan inserciones, etc). Con el Lock, solo se
+# genera UN PDF a la vez en todo el proceso.
+_pdf_generation_lock = threading.Lock()
+
 # ── WATERMARK ─────────────────────────────────────────────────────────────────
 
 def _sb_leer_watermark() -> int | None:
@@ -70,6 +79,7 @@ def _sb_guardar_watermark(numero: int):
 # ── FOLIO ─────────────────────────────────────────────────────────────────────
 
 def _sb_folio_existe(folio: str) -> bool:
+    """Se mantiene por compatibilidad, ya no se usa en el bucle principal."""
     try:
         r = supabase.table("folios_registrados").select("folio").eq("folio", folio).execute()
         return len(r.data) > 0
@@ -78,16 +88,41 @@ def _sb_folio_existe(folio: str) -> bool:
         return False
 
 def _sb_obtener_siguiente_folio() -> str:
-    candidato = folio_counter["siguiente"]
-    for _ in range(MAX_INTENTOS_FOLIO):
-        folio = f"{FOLIO_PREFIJO}{candidato}"
-        if not _sb_folio_existe(folio):
-            folio_counter["siguiente"] = candidato + 1
-            _sb_guardar_watermark(candidato)
-            print(f"[FOLIO] Asignado: {folio}  (siguiente: {folio_counter['siguiente']})")
-            return folio
-        print(f"[FOLIO] {folio} ocupado -> probando siguiente")
-        candidato += 1
+    """
+    FIX: antes preguntaba folio por folio a Supabase (1 request de red por
+    candidato). Si había varios folios ocupados seguidos, eso eran muchos
+    round-trips antes de encontrar uno libre — lento y arriesgado bajo carga.
+    Ahora pide candidatos en bloques de 500 con UNA sola consulta (.in_) y
+    resuelve el primero libre en memoria con Python puro.
+    """
+    inicio = folio_counter["siguiente"]
+    BLOQUE = 500
+    revisados = 0
+
+    while revisados < MAX_INTENTOS_FOLIO:
+        candidatos = [f"{FOLIO_PREFIJO}{inicio + i}" for i in range(BLOQUE)]
+
+        try:
+            resp = supabase.table("folios_registrados") \
+                .select("folio").in_("folio", candidatos).execute()
+            ocupados = {r["folio"] for r in (resp.data or [])}
+        except Exception as e:
+            print(f"[ERROR] consultando bloque de folios: {e}")
+            ocupados = set()
+
+        print(f"[FOLIO] bloque de {BLOQUE} revisado, ocupados={len(ocupados)}")
+
+        for i, folio in enumerate(candidatos):
+            if folio not in ocupados:
+                numero_final = inicio + i
+                folio_counter["siguiente"] = numero_final + 1
+                _sb_guardar_watermark(numero_final)
+                print(f"[FOLIO] Asignado: {folio}  (siguiente: {folio_counter['siguiente']})")
+                return folio
+
+        inicio += BLOQUE
+        revisados += BLOQUE
+
     raise Exception("Sin folio disponible — limite alcanzado")
 
 def _sb_inicializar_folio():
@@ -199,50 +234,59 @@ def _generar_qr_cdmx(folio: str):
         return None
 
 def _generar_pdf_unificado(datos: dict) -> str:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    filename  = f"{OUTPUT_DIR}/{datos['folio']}_completo.pdf"
-    hoy       = datos["fecha_obj"]
-    fecha_ven = hoy + timedelta(days=DIAS_PERMISO)
-    anio_str  = str(hoy.year)
-    try:
-        doc1  = fitz.open(PLANTILLA_PDF)
-        page1 = doc1[0]
-        page1.insert_text((50,  130), "FOLIO: ",                     fontsize=12, color=(0,0,0))
-        page1.insert_text((100, 130), datos["folio"],                 fontsize=12, color=(1,0,0))
-        page1.insert_text((130, 145), datos["fecha"],                 fontsize=12, color=(0,0,0))
-        page1.insert_text((87,  290), datos["marca"],                 fontsize=11, color=(0,0,0))
-        page1.insert_text((375, 290), datos["serie"],                 fontsize=11, color=(0,0,0))
-        page1.insert_text((87,  307), datos["linea"],                 fontsize=11, color=(0,0,0))
-        page1.insert_text((375, 307), datos["motor"],                 fontsize=11, color=(0,0,0))
-        page1.insert_text((87,  323), datos["anio"],                  fontsize=11, color=(0,0,0))
-        page1.insert_text((375, 323), fecha_ven.strftime("%d/%m/%Y"), fontsize=11, color=(0,0,0))
-        page1.insert_text((375, 340), datos["nombre"],                fontsize=11, color=(0,0,0))
-        img_qr = _generar_qr_cdmx(datos["folio"])
-        if img_qr:
-            from io import BytesIO
-            buf = BytesIO()
-            img_qr.save(buf, format="PNG"); buf.seek(0)
-            qr_pix = fitz.Pixmap(buf.read())
-            page1.insert_image(fitz.Rect(49, 653, 145, 749), pixmap=qr_pix, overlay=True)
-            print("[QR] Insertado en pagina 1")
-        doc2  = fitz.open(PLANTILLA_BUENO)
-        page2 = doc2[0]
-        titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS "
-                  f"(PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
-        page2.insert_text((135, 168), titulo,                   fontsize=6,  fontname="hebo", color=(0,0,0))
-        page2.insert_text((135, 192), datos["serie"],           fontsize=6,  fontname="hebo", color=(0,0,0))
-        page2.insert_text((135, 200), anio_str,                 fontsize=6,  fontname="hebo", color=(0,0,0))
-        page2.insert_text((345, 430), f"${PRECIO_PERMISO}",     fontsize=12, fontname="hebo", color=(0,0,0))
-        page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"), fontsize=6,  fontname="hebo", color=(0,0,0))
-        doc1.insert_pdf(doc2)
-        doc2.close(); doc1.save(filename); doc1.close()
-        print(f"[PDF] Generado: {filename}")
-    except Exception as e:
-        print(f"[ERROR PDF] {e}")
-        fb = fitz.open()
-        fb.new_page().insert_text((50, 50), f"ERROR - {datos['folio']}", fontsize=12)
-        fb.save(filename); fb.close()
-    return filename
+    """
+    FIX: todo el cuerpo va dentro de _pdf_generation_lock — PyMuPDF no es
+    thread-safe, así que si dos generaciones corren al mismo tiempo en
+    threads distintos (vía asyncio.to_thread), se corrompen entre sí sin
+    este candado. También se fuerza str() en TODOS los insert_text, para
+    blindar contra cualquier valor no-string que truene con
+    "'int' object has no attribute 'splitlines'" o similar.
+    """
+    with _pdf_generation_lock:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        filename  = f"{OUTPUT_DIR}/{datos['folio']}_completo.pdf"
+        hoy       = datos["fecha_obj"]
+        fecha_ven = hoy + timedelta(days=DIAS_PERMISO)
+        anio_str  = str(hoy.year)
+        try:
+            doc1  = fitz.open(PLANTILLA_PDF)
+            page1 = doc1[0]
+            page1.insert_text((50,  130), "FOLIO: ",                          fontsize=12, color=(0,0,0))
+            page1.insert_text((100, 130), str(datos["folio"]),                fontsize=12, color=(1,0,0))
+            page1.insert_text((130, 145), str(datos["fecha"]),                fontsize=12, color=(0,0,0))
+            page1.insert_text((87,  290), str(datos["marca"]),                fontsize=11, color=(0,0,0))
+            page1.insert_text((375, 290), str(datos["serie"]),                fontsize=11, color=(0,0,0))
+            page1.insert_text((87,  307), str(datos["linea"]),                fontsize=11, color=(0,0,0))
+            page1.insert_text((375, 307), str(datos["motor"]),                fontsize=11, color=(0,0,0))
+            page1.insert_text((87,  323), str(datos["anio"]),                 fontsize=11, color=(0,0,0))
+            page1.insert_text((375, 323), fecha_ven.strftime("%d/%m/%Y"),     fontsize=11, color=(0,0,0))
+            page1.insert_text((375, 340), str(datos["nombre"]),               fontsize=11, color=(0,0,0))
+            img_qr = _generar_qr_cdmx(datos["folio"])
+            if img_qr:
+                from io import BytesIO
+                buf = BytesIO()
+                img_qr.save(buf, format="PNG"); buf.seek(0)
+                qr_pix = fitz.Pixmap(buf.read())
+                page1.insert_image(fitz.Rect(49, 653, 145, 749), pixmap=qr_pix, overlay=True)
+                print("[QR] Insertado en pagina 1")
+            doc2  = fitz.open(PLANTILLA_BUENO)
+            page2 = doc2[0]
+            titulo = (f"IMPUESTO POR DERECHO DE AUTOMOVIL Y MOTOCICLETAS "
+                      f"(PERMISO PARA CIRCULAR {DIAS_PERMISO} DIAS)")
+            page2.insert_text((135, 168), titulo,                   fontsize=6,  fontname="hebo", color=(0,0,0))
+            page2.insert_text((135, 192), str(datos["serie"]),      fontsize=6,  fontname="hebo", color=(0,0,0))
+            page2.insert_text((135, 200), anio_str,                 fontsize=6,  fontname="hebo", color=(0,0,0))
+            page2.insert_text((345, 430), f"${PRECIO_PERMISO}",     fontsize=12, fontname="hebo", color=(0,0,0))
+            page2.insert_text((190, 324), hoy.strftime("%d/%m/%Y"), fontsize=6,  fontname="hebo", color=(0,0,0))
+            doc1.insert_pdf(doc2)
+            doc2.close(); doc1.save(filename); doc1.close()
+            print(f"[PDF] Generado: {filename}")
+        except Exception as e:
+            print(f"[ERROR PDF] {e}")
+            fb = fitz.open()
+            fb.new_page().insert_text((50, 50), f"ERROR - {datos['folio']}", fontsize=12)
+            fb.save(filename); fb.close()
+        return filename
 
 async def send_document_con_retry(chat_id: int, path: str, caption: str, reply_markup, reintentos: int = 3) -> bool:
     for intento in range(1, reintentos + 1):
@@ -640,7 +684,7 @@ async def lifespan(app: FastAPI):
             _keep_task = asyncio.create_task(keep_alive())
         else:
             print("[POLLING] Sin webhook")
-        print("[SISTEMA] CDMX v7.6 iniciado!")
+        print("[SISTEMA] CDMX v7.7 iniciado!")
         yield
     except Exception as e:
         print(f"[ERROR CRITICO] {e}"); yield
@@ -651,7 +695,7 @@ async def lifespan(app: FastAPI):
             with suppress(asyncio.CancelledError): await _keep_task
         await bot.session.close()
 
-app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.6")
+app = FastAPI(lifespan=lifespan, title="Sistema CDMX Digital", version="7.7")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
@@ -668,13 +712,17 @@ async def telegram_webhook(request: Request):
 async def health():
     return {
         "ok":             True,
-        "sistema":        "CDMX v7.6",
+        "sistema":        "CDMX v7.7",
         "vigencia":       f"{DIAS_PERMISO} dias",
         "precio":         f"${PRECIO_PERMISO}",
         "timer":          "36 horas",
         "active_timers":  len(timers_activos),
         "siguiente_folio":f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
-        "cambios_v7.6":   ["/banamex en lugar de /chuleta", "timeout 300s"]
+        "cambios_v7.7":   [
+            "Folios en bloques de 500 (.in_) en vez de uno por uno",
+            "Lock global para generación de PDF (PyMuPDF no es thread-safe)",
+            "str() forzado en todos los insert_text"
+        ]
     }
 
 @app.get("/status")
@@ -688,7 +736,7 @@ async def status_detail():
             "user_id":   info.get("user_id")
         }
     return {
-        "sistema":        "CDMX v7.6",
+        "sistema":        "CDMX v7.7",
         "timers_activos": len(timers_activos),
         "folios":         activos,
         "siguiente_folio":f"{FOLIO_PREFIJO}{folio_counter['siguiente']}",
